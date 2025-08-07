@@ -1,5 +1,5 @@
 Bootstrap: docker
-From: ubuntu:22.04
+From: nvcr.io/nvidia/isaac-sim:4.5.0
 
 %post
     # Set environment variables to avoid interactive prompts
@@ -21,17 +21,23 @@ From: ubuntu:22.04
         tzdata
     
     # Set up locale
-    locale-gen en_US.UTF-8
+    locale-gen en_US en_US.UTF-8
+    update-locale LC_ALL=en_US.UTF-8 LANG=en_US.UTF-8
+    export LANG=en_US.UTF-8
+
+    # ROS2 Humble setup
+    apt install software-properties-common -y
+    add-apt-repository universe
+    apt update && apt install curl -y
     
-    # Add ROS2 apt repository
-    curl -sSL https://raw.githubusercontent.com/ros/rosdistro/master/ros.key -o /usr/share/keyrings/ros-archive-keyring.gpg
-    echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/ros-archive-keyring.gpg] http://packages.ros.org/ros2/ubuntu $(. /etc/os-release && echo $UBUNTU_CODENAME) main" | tee /etc/apt/sources.list.d/ros2.list > /dev/null
+    export ROS_APT_SOURCE_VERSION=$(curl -s https://api.github.com/repos/ros-infrastructure/ros-apt-source/releases/latest | grep -F "tag_name" | awk -F\" '{print $4}')
+    curl -L -o /tmp/ros2-apt-source.deb "https://github.com/ros-infrastructure/ros-apt-source/releases/download/${ROS_APT_SOURCE_VERSION}/ros2-apt-source_${ROS_APT_SOURCE_VERSION}.$(. /etc/os-release && echo $VERSION_CODENAME)_all.deb"
+    dpkg -i /tmp/ros2-apt-source.deb
+    rm /tmp/ros2-apt-source.deb
+    apt update
     
-    # Update package lists again
-    apt-get update
-    
-    # Install ROS2 Humble desktop
-    apt-get install -y ros-humble-desktop
+    # Then proceed with ROS2 installation
+    apt-get install -y ros-humble-ros-base
     
     # Install additional ROS2 tools
     apt-get install -y \
@@ -45,20 +51,28 @@ From: ubuntu:22.04
     
     # Initialize rosdep
     rosdep init || true
+
+    # Anaconda installation
+    wget -q --show-progress --progress=bar:force:noscroll \
+    https://repo.anaconda.com/archive/Anaconda3-2024.10-1-Linux-x86_64.sh \
+    -O /tmp/Anaconda3-2024.10-1-Linux-x86_64.sh
+
+    bash /tmp/Anaconda3-2024.10-1-Linux-x86_64.sh -b
+
+    rm /tmp/Anaconda3-2024.10-1-Linux-x86_64.sh
+
+    /root/anaconda3/bin/conda init && /root/anaconda3/bin/conda config --set auto_activate_base false
     
-    # Install Miniconda
-    wget https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh -O /tmp/miniconda.sh
-    bash /tmp/miniconda.sh -b -p /opt/miniconda3
-    rm /tmp/miniconda.sh
-    
-    # Make conda available to all users
-    ln -s /opt/miniconda3/etc/profile.d/conda.sh /etc/profile.d/conda.sh
-    echo '. /opt/miniconda3/etc/profile.d/conda.sh' >> /etc/bash.bashrc
-    echo 'conda activate base' >> /etc/bash.bashrc
+    # Create IsaacLab conda environment and install PyTorch
+    # conda create -n env_isaaclab python=3.10 -y
+    # conda activate env_isaaclab
+    # pip install torch==2.7.0 torchvision==0.22.0 --index-url https://download.pytorch.org/whl/cu128
+    # pip install --upgrade pip
+    # pip install 'isaacsim[all,extscache]==4.5.0' --extra-index-url https://pypi.nvidia.com
     
     # Clean up
-    apt-get clean
-    rm -rf /var/lib/apt/lists/*
+    # apt-get clean
+    # rm -rf /var/lib/apt/lists/*
 
 %environment
     # Set locale
@@ -66,11 +80,14 @@ From: ubuntu:22.04
     export LC_ALL=en_US.UTF-8
     
     # Add conda to PATH
-    export PATH="/opt/miniconda3/bin:$PATH"
+    export PATH="/root/anaconda3/bin:$PATH"
     
     # Source ROS2 setup
     export ROS_DISTRO=humble
     . /opt/ros/humble/setup.sh
+
+    # Source conda
+    . ~/.bashrc
 
 %runscript
     # Default behavior when container is run

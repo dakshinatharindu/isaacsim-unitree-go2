@@ -60,46 +60,27 @@ From: nvcr.io/nvidia/isaac-sim:4.5.0
     # Initialize rosdep
     rosdep init || true
 
-    # Anaconda installation
-    wget -q --show-progress --progress=bar:force:noscroll \
-    https://repo.anaconda.com/archive/Anaconda3-2024.10-1-Linux-x86_64.sh \
-    -O /tmp/Anaconda3-2024.10-1-Linux-x86_64.sh
-
-    bash /tmp/Anaconda3-2024.10-1-Linux-x86_64.sh -b
-
-    rm /tmp/Anaconda3-2024.10-1-Linux-x86_64.sh
-
-    /root/anaconda3/bin/conda init && /root/anaconda3/bin/conda config --set auto_activate_base false
-    
-    # Create IsaacLab conda environment and install PyTorch
-    # conda create -n env_isaaclab python=3.10 -y
-    # conda activate env_isaaclab
-    # pip install torch==2.7.0 torchvision==0.22.0 --index-url https://download.pytorch.org/whl/cu128
-    # pip install --upgrade pip
-    # pip install 'isaacsim[all,extscache]==4.5.0' --extra-index-url https://pypi.nvidia.com
-    
-    # Clean up
-    # apt-get clean
-    # rm -rf /var/lib/apt/lists/*
-
 %environment
     # Set locale
     export LANG=en_US.UTF-8
     export LC_ALL=en_US.UTF-8
     
-    # Add conda to PATH
-    export PATH="/root/anaconda3/bin:$PATH"
-    
     # Source ROS2 setup
     export ROS_DISTRO=humble
     . /opt/ros/humble/setup.sh
 
-    # Source conda
-    . ~/.bashrc
+    # Add required modules to PATH
+    export PATH=/apps/conda/25.3.1/bin:/apps/conda/25.3.1/condabin:/apps/conda/scripts:$PATH
+    export PATH=/apps/tmux/3.5/bin:$PATH
+    export PATH=/apps/compilers/cuda/12.9.1/bin:$PATH
 
 %runscript
     # Default behavior when container is run
     exec /bin/bash "$@"
+
+%apprun shell
+    . /apps/conda/25.3.1/etc/profile.d/conda.sh
+    exec /bin/bash
 
 %startscript
     # Commands to run when container starts as an instance
@@ -109,14 +90,10 @@ From: nvcr.io/nvidia/isaac-sim:4.5.0
     This container provides:
     - Ubuntu 22.04 base
     - ROS2 Humble desktop installation
-    - User 'rosuser' with passwordless sudo access
     - Pre-configured ROS2 environment
     
     To use:
-    apptainer shell ros2_humble.sif
-    
-    Then switch to the rosuser:
-    su - rosuser
+    apptainer shell container.sif
     
     Or run directly as rosuser:
-    apptainer exec --fakeroot ros2_humble.sif su - rosuser
+    apptainer exec --fakeroot container.sif

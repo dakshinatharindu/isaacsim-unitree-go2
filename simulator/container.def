@@ -74,10 +74,11 @@ From: nvcr.io/nvidia/isaac-sim:4.5.0
     export PATH=/apps/tmux/3.5/bin:$PATH
     export PATH=/apps/compilers/cuda/12.9.1/bin:$PATH
 
+    . /apps/conda/25.3.1/etc/profile.d/conda.sh
+
 %runscript
     # Default behavior when container is run
     exec /bin/bash "$@"
-    . /apps/conda/25.3.1/etc/profile.d/conda.sh
 
 %startscript
     # Commands to run when container starts as an instance

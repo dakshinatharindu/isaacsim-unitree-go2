@@ -77,10 +77,7 @@ From: nvcr.io/nvidia/isaac-sim:4.5.0
 %runscript
     # Default behavior when container is run
     exec /bin/bash "$@"
-
-%apprun shell
     . /apps/conda/25.3.1/etc/profile.d/conda.sh
-    exec /bin/bash
 
 %startscript
     # Commands to run when container starts as an instance
@@ -93,7 +90,4 @@ From: nvcr.io/nvidia/isaac-sim:4.5.0
     - Pre-configured ROS2 environment
     
     To use:
-    apptainer shell container.sif
-    
-    Or run directly as rosuser:
-    apptainer exec --fakeroot container.sif
+    apptainer exec container.sif bash

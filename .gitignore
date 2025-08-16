@@ -3,3 +3,5 @@ isaacsim/
 *.zip
 *.sif
 
+simulator/IsaacSim/
+simulator/IsaacLab/

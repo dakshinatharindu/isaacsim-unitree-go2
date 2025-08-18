@@ -17,6 +17,8 @@ from geometry_msgs.msg import Twist
 from cv_bridge import CvBridge
 import threading
 import time
+import os
+from datetime import datetime
 
 class Go2ForkliftController(Node):
     def __init__(self):
@@ -29,9 +31,11 @@ class Go2ForkliftController(Node):
         self.declare_parameter('turn_speed', 0.5)  # rad/s for turning
         self.declare_parameter('detection_interval', 2.0)  # seconds
         self.declare_parameter('search_timeout', 10.0)  # seconds before turning
-        self.declare_parameter('turn_duration', 3.0)  # seconds to turn left
+        self.declare_parameter('turn_duration', 6.0)  # seconds to turn left
         self.declare_parameter('image_topic', '/unitree_go2/front_cam/color_image')
         self.declare_parameter('cmd_vel_topic', '/unitree_go2/cmd_vel')
+        self.declare_parameter('save_detection_image', True)  # whether to save detected image
+        self.declare_parameter('output_dir', './forklift_detections')  # directory to save images
         
         # Get parameters
         self.vllm_server_url = self.get_parameter('vllm_server_url').get_parameter_value().string_value
@@ -43,6 +47,8 @@ class Go2ForkliftController(Node):
         self.turn_duration = self.get_parameter('turn_duration').get_parameter_value().double_value
         self.image_topic = self.get_parameter('image_topic').get_parameter_value().string_value
         self.cmd_vel_topic = self.get_parameter('cmd_vel_topic').get_parameter_value().string_value
+        self.save_detection_image = self.get_parameter('save_detection_image').get_parameter_value().bool_value
+        self.output_dir = self.get_parameter('output_dir').get_parameter_value().string_value
         
         # State variables
         self.current_image = None
@@ -55,6 +61,10 @@ class Go2ForkliftController(Node):
         self.search_state = "FORWARD"  # "FORWARD" or "TURNING"
         self.last_forward_start = time.time()
         self.turn_start_time = None
+        
+        # Create output directory for saving detection images
+        if self.save_detection_image:
+            self.setup_output_directory()
         
         # QoS profile for image subscription (to handle potential network issues)
         qos_profile = QoSProfile(
@@ -88,6 +98,17 @@ class Go2ForkliftController(Node):
         self.test_server_connection()
         
         self.get_logger().info("Go-2 Forklift Controller initialized successfully!")
+        if self.save_detection_image:
+            self.get_logger().info(f"Detection images will be saved to: {self.output_dir}")
+    
+    def setup_output_directory(self):
+        """Create output directory for saving detection images."""
+        try:
+            os.makedirs(self.output_dir, exist_ok=True)
+            self.get_logger().info(f"Output directory ready: {self.output_dir}")
+        except Exception as e:
+            self.get_logger().error(f"Failed to create output directory {self.output_dir}: {e}")
+            self.save_detection_image = False
         
     def wait_for_image(self):
         """Wait for the first image to arrive."""
@@ -134,6 +155,43 @@ class Go2ForkliftController(Node):
             return image_base64
         except Exception as e:
             self.get_logger().error(f"Error encoding image: {e}")
+            return None
+    
+    def save_forklift_image(self, cv_image, vllm_response):
+        """Save the image where forklift was detected."""
+        if not self.save_detection_image:
+            return None
+            
+        try:
+            # Generate filename with timestamp
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            filename = f"forklift_detected_{timestamp}.jpg"
+            filepath = os.path.join(self.output_dir, filename)
+            
+            # Add text overlay with detection info
+            overlay_image = cv_image.copy()
+            
+            # Add timestamp
+            cv2.putText(overlay_image, f"Detected: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}", 
+                       (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+            
+            # Add detection response (truncated if too long)
+            response_text = vllm_response[:50] + "..." if len(vllm_response) > 50 else vllm_response
+            cv2.putText(overlay_image, f"Response: {response_text}", 
+                       (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
+            
+            # Save the image
+            success = cv2.imwrite(filepath, overlay_image)
+            
+            if success:
+                self.get_logger().info(f"✅ Forklift detection image saved: {filepath}")
+                return filepath
+            else:
+                self.get_logger().error(f"❌ Failed to save image to {filepath}")
+                return None
+                
+        except Exception as e:
+            self.get_logger().error(f"Error saving forklift image: {e}")
             return None
     
     def detect_forklift(self, cv_image):
@@ -216,7 +274,7 @@ class Go2ForkliftController(Node):
         twist.linear.z = 0.0
         twist.angular.x = 0.0
         twist.angular.y = 0.0
-        twist.angular.z = self.turn_speed  # Positive Z = turn left
+        twist.angular.z = -self.turn_speed  # Positive Z = turn left
         
         self.cmd_vel_pub.publish(twist)
     
@@ -270,6 +328,12 @@ class Go2ForkliftController(Node):
             if forklift_found:
                 self.get_logger().info("🎉 FORKLIFT DETECTED! Stopping robot.")
                 self.get_logger().info(f"Detection details: {response}")
+                
+                # Save the detection image
+                saved_path = self.save_forklift_image(image_copy, response)
+                if saved_path:
+                    self.get_logger().info(f"Detection image saved to: {saved_path}")
+                
                 self.forklift_detected = True
                 self.stop_robot()
                 # Stop the detection timer
@@ -342,7 +406,9 @@ def generate_launch_description():
                 'search_timeout': 10.0,  # seconds before turning
                 'turn_duration': 3.0,  # seconds to turn left
                 'image_topic': '/unitree_go2/front_cam/color_image',
-                'cmd_vel_topic': '/cmd_vel'
+                'cmd_vel_topic': '/cmd_vel',
+                'save_detection_image': True,  # whether to save detected image
+                'output_dir': './forklift_detections'  # directory to save images
             }]
         )
     ])

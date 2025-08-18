@@ -26,7 +26,10 @@ class Go2ForkliftController(Node):
         self.declare_parameter('vllm_server_url', 'http://localhost:8000')
         self.declare_parameter('model_name', 'llava-hf/llava-1.5-7b-hf')
         self.declare_parameter('forward_speed', 0.5)  # m/s
+        self.declare_parameter('turn_speed', 0.5)  # rad/s for turning
         self.declare_parameter('detection_interval', 2.0)  # seconds
+        self.declare_parameter('search_timeout', 10.0)  # seconds before turning
+        self.declare_parameter('turn_duration', 3.0)  # seconds to turn left
         self.declare_parameter('image_topic', '/unitree_go2/front_cam/color_image')
         self.declare_parameter('cmd_vel_topic', '/unitree_go2/cmd_vel')
         
@@ -34,7 +37,10 @@ class Go2ForkliftController(Node):
         self.vllm_server_url = self.get_parameter('vllm_server_url').get_parameter_value().string_value
         self.model_name = self.get_parameter('model_name').get_parameter_value().string_value
         self.forward_speed = self.get_parameter('forward_speed').get_parameter_value().double_value
+        self.turn_speed = self.get_parameter('turn_speed').get_parameter_value().double_value
         self.detection_interval = self.get_parameter('detection_interval').get_parameter_value().double_value
+        self.search_timeout = self.get_parameter('search_timeout').get_parameter_value().double_value
+        self.turn_duration = self.get_parameter('turn_duration').get_parameter_value().double_value
         self.image_topic = self.get_parameter('image_topic').get_parameter_value().string_value
         self.cmd_vel_topic = self.get_parameter('cmd_vel_topic').get_parameter_value().string_value
         
@@ -44,6 +50,11 @@ class Go2ForkliftController(Node):
         self.running = True
         self.bridge = CvBridge()
         self.image_lock = threading.Lock()
+        
+        # Search pattern state
+        self.search_state = "FORWARD"  # "FORWARD" or "TURNING"
+        self.last_forward_start = time.time()
+        self.turn_start_time = None
         
         # QoS profile for image subscription (to handle potential network issues)
         qos_profile = QoSProfile(
@@ -197,6 +208,18 @@ class Go2ForkliftController(Node):
         
         self.cmd_vel_pub.publish(twist)
     
+    def turn_left(self):
+        """Send command to turn robot left."""
+        twist = Twist()
+        twist.linear.x = 0.0
+        twist.linear.y = 0.0
+        twist.linear.z = 0.0
+        twist.angular.x = 0.0
+        twist.angular.y = 0.0
+        twist.angular.z = self.turn_speed  # Positive Z = turn left
+        
+        self.cmd_vel_pub.publish(twist)
+    
     def stop_robot(self):
         """Send command to stop robot."""
         twist = Twist()  # All zeros
@@ -204,13 +227,32 @@ class Go2ForkliftController(Node):
         self.get_logger().info("Robot stopped!")
     
     def control_loop(self):
-        """Main control loop callback (10Hz)."""
+        """Main control loop callback (10Hz) - implements search pattern."""
         if not self.running or self.forklift_detected:
             self.stop_robot()
             return
+        
+        current_time = time.time()
+        
+        if self.search_state == "FORWARD":
+            # Move forward
+            self.move_forward()
             
-        # Move forward
-        self.move_forward()
+            # Check if we should switch to turning
+            if current_time - self.last_forward_start >= self.search_timeout:
+                self.get_logger().info("No forklift found, switching to turn left...")
+                self.search_state = "TURNING"
+                self.turn_start_time = current_time
+                
+        elif self.search_state == "TURNING":
+            # Turn left
+            self.turn_left()
+            
+            # Check if we should switch back to forward
+            if current_time - self.turn_start_time >= self.turn_duration:
+                self.get_logger().info("Turn completed, resuming forward movement...")
+                self.search_state = "FORWARD"
+                self.last_forward_start = current_time
     
     def detection_callback(self):
         """Forklift detection callback."""
@@ -218,7 +260,7 @@ class Go2ForkliftController(Node):
             return
             
         if self.current_image is not None:
-            self.get_logger().info("Checking for forklift...")
+            self.get_logger().info(f"Checking for forklift... (State: {self.search_state})")
             
             with self.image_lock:
                 image_copy = self.current_image.copy()
@@ -235,7 +277,13 @@ class Go2ForkliftController(Node):
                 # Optionally stop control timer too
                 self.control_timer.cancel()
             else:
-                self.get_logger().info("No forklift detected, continuing forward...")
+                self.get_logger().info(f"No forklift detected, continuing search pattern... (State: {self.search_state})")
+                # Reset forward timer only if we're currently moving forward and just detected
+                if self.search_state == "FORWARD":
+                    # Optionally reset the search timeout when actively searching
+                    # Uncomment next line if you want to reset timer on each detection attempt
+                    # self.last_forward_start = time.time()
+                    pass
         else:
             self.get_logger().warn("No image available for detection")
 
@@ -245,8 +293,9 @@ def main(args=None):
     try:
         controller = Go2ForkliftController()
         
-        controller.get_logger().info("Starting forklift detection mission...")
-        controller.get_logger().info(f"Moving forward at {controller.forward_speed} m/s")
+        controller.get_logger().info("Starting forklift detection mission with search pattern...")
+        controller.get_logger().info(f"Forward speed: {controller.forward_speed} m/s, Turn speed: {controller.turn_speed} rad/s")
+        controller.get_logger().info(f"Search pattern: Forward for {controller.search_timeout}s, then turn left for {controller.turn_duration}s")
         controller.get_logger().info(f"Checking for forklift every {controller.detection_interval} seconds")
         
         # Spin the node
@@ -288,7 +337,10 @@ def generate_launch_description():
                 'vllm_server_url': 'http://localhost:8000',
                 'model_name': 'llava-hf/llava-1.5-7b-hf',
                 'forward_speed': 0.5,  # m/s
+                'turn_speed': 0.5,  # rad/s for turning
                 'detection_interval': 2.0,  # seconds
+                'search_timeout': 10.0,  # seconds before turning
+                'turn_duration': 3.0,  # seconds to turn left
                 'image_topic': '/unitree_go2/front_cam/color_image',
                 'cmd_vel_topic': '/cmd_vel'
             }]

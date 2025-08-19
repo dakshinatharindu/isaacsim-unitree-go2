@@ -8,18 +8,20 @@
    ```
 2. Run the container:
    ```
-   apptainer exec container.sif bash
+   apptainer exec --nv    --env PRIVACY_CONSENT=Y     --env DISPLAY=$DISPLAY     --env ACCEPT_EULA=Y     --bind /apps/conda:/apps/conda  container.sif bash
+   ```
 
 3. IsaacSim installation:
    Download the IsaacSim 4.5 binary and extract in `simulator` directory.
    ```
    wget https://download.isaacsim.omniverse.nvidia.com/isaac-sim-standalone%404.5.0-rc.36%2Brelease.19112.f59b3005.gl.linux-x86_64.release.zip
-   unzip isaac-sim-standalone@4.5.0-rc.36+release.19112.f59b3005.gl.linux-x86_64.release.zip -d /IsaacSim
+   unzip isaac-sim-standalone@4.5.0-rc.36+release.19112.f59b3005.gl.linux-x86_64.release.zip -d ./IsaacSim
    ```
 4. IsaacLab installation:
    ```
    git clone https://github.com/isaac-sim/IsaacLab.git
    cd IsaacLab
+   git checkout v2.2.0
    ln -s $(realpath ../IsaacSim) _isaac_sim
    ./isaaclab.sh --conda isaaclab
    conda activate isaaclab

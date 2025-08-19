@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
 Go-2 Robot Forklift Detection Controller for Isaac Sim (ROS2 Humble)
-Moves robot forward until it detects a forklift using vLLM vision model.
+1. Rotates in place until it detects a forklift using vLLM vision model
+2. Once detected, moves towards the forklift
 """
 
 import rclpy
@@ -27,28 +28,30 @@ class Go2ForkliftController(Node):
         # Declare parameters
         self.declare_parameter('vllm_server_url', 'http://localhost:8000')
         self.declare_parameter('model_name', 'llava-hf/llava-1.5-7b-hf')
-        self.declare_parameter('forward_speed', 0.5)  # m/s
-        self.declare_parameter('turn_speed', 0.5)  # rad/s for turning
+        self.declare_parameter('forward_speed', 0.3)  # m/s - reduced for approach
+        self.declare_parameter('rotation_speed', 0.4)  # rad/s for searching rotation
+        self.declare_parameter('approach_speed', 0.2)  # m/s - slower approach speed
         self.declare_parameter('detection_interval', 2.0)  # seconds
-        self.declare_parameter('search_timeout', 10.0)  # seconds before turning
-        self.declare_parameter('turn_duration', 6.0)  # seconds to turn left
+        self.declare_parameter('approach_timeout', 15.0)  # seconds to approach before stopping
         self.declare_parameter('image_topic', '/unitree_go2/front_cam/color_image')
         self.declare_parameter('cmd_vel_topic', '/unitree_go2/cmd_vel')
         self.declare_parameter('save_detection_image', True)  # whether to save detected image
         self.declare_parameter('output_dir', './forklift_detections')  # directory to save images
+        self.declare_parameter('stop_distance_check', False)  # whether to check if close enough to stop
         
         # Get parameters
         self.vllm_server_url = self.get_parameter('vllm_server_url').get_parameter_value().string_value
         self.model_name = self.get_parameter('model_name').get_parameter_value().string_value
         self.forward_speed = self.get_parameter('forward_speed').get_parameter_value().double_value
-        self.turn_speed = self.get_parameter('turn_speed').get_parameter_value().double_value
+        self.rotation_speed = self.get_parameter('rotation_speed').get_parameter_value().double_value
+        self.approach_speed = self.get_parameter('approach_speed').get_parameter_value().double_value
         self.detection_interval = self.get_parameter('detection_interval').get_parameter_value().double_value
-        self.search_timeout = self.get_parameter('search_timeout').get_parameter_value().double_value
-        self.turn_duration = self.get_parameter('turn_duration').get_parameter_value().double_value
+        self.approach_timeout = self.get_parameter('approach_timeout').get_parameter_value().double_value
         self.image_topic = self.get_parameter('image_topic').get_parameter_value().string_value
         self.cmd_vel_topic = self.get_parameter('cmd_vel_topic').get_parameter_value().string_value
         self.save_detection_image = self.get_parameter('save_detection_image').get_parameter_value().bool_value
         self.output_dir = self.get_parameter('output_dir').get_parameter_value().string_value
+        self.stop_distance_check = self.get_parameter('stop_distance_check').get_parameter_value().bool_value
         
         # State variables
         self.current_image = None
@@ -57,10 +60,9 @@ class Go2ForkliftController(Node):
         self.bridge = CvBridge()
         self.image_lock = threading.Lock()
         
-        # Search pattern state
-        self.search_state = "FORWARD"  # "FORWARD" or "TURNING"
-        self.last_forward_start = time.time()
-        self.turn_start_time = None
+        # Robot behavior state
+        self.robot_state = "SEARCHING"  # "SEARCHING", "APPROACHING", "ARRIVED"
+        self.approach_start_time = None
         
         # Create output directory for saving detection images
         if self.save_detection_image:
@@ -88,8 +90,6 @@ class Go2ForkliftController(Node):
         # Timer for forklift detection
         self.detection_timer = self.create_timer(self.detection_interval, self.detection_callback)
         
-        self.last_detection_time = time.time()
-        
         # Wait for first image
         self.get_logger().info("Waiting for camera feed...")
         self.wait_for_image()
@@ -98,6 +98,7 @@ class Go2ForkliftController(Node):
         self.test_server_connection()
         
         self.get_logger().info("Go-2 Forklift Controller initialized successfully!")
+        self.get_logger().info("Behavior: Search by rotating -> Approach forklift when found")
         if self.save_detection_image:
             self.get_logger().info(f"Detection images will be saved to: {self.output_dir}")
     
@@ -157,15 +158,15 @@ class Go2ForkliftController(Node):
             self.get_logger().error(f"Error encoding image: {e}")
             return None
     
-    def save_forklift_image(self, cv_image, vllm_response):
+    def save_forklift_image(self, cv_image, vllm_response, state):
         """Save the image where forklift was detected."""
         if not self.save_detection_image:
             return None
             
         try:
-            # Generate filename with timestamp
+            # Generate filename with timestamp and state
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            filename = f"forklift_detected_{timestamp}.jpg"
+            filename = f"forklift_{state.lower()}_{timestamp}.jpg"
             filepath = os.path.join(self.output_dir, filename)
             
             # Add text overlay with detection info
@@ -175,10 +176,14 @@ class Go2ForkliftController(Node):
             cv2.putText(overlay_image, f"Detected: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}", 
                        (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
             
+            # Add robot state
+            cv2.putText(overlay_image, f"State: {state}", 
+                       (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 0, 0), 2)
+            
             # Add detection response (truncated if too long)
             response_text = vllm_response[:50] + "..." if len(vllm_response) > 50 else vllm_response
             cv2.putText(overlay_image, f"Response: {response_text}", 
-                       (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
+                       (10, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
             
             # Save the image
             success = cv2.imwrite(filepath, overlay_image)
@@ -202,11 +207,18 @@ class Go2ForkliftController(Node):
             if image_base64 is None:
                 return False, "Image encoding failed"
             
-            # Prepare request
+            # Prepare request with different prompts based on state
             headers = {"Content-Type": "application/json"}
-            prompt = ("Look at this image carefully. Is there a forklift visible in the image? "
-                     "Answer with 'YES' if you can see a forklift, or 'NO' if you cannot see a forklift. "
-                     "Be specific and only answer YES or NO followed by a brief explanation.")
+            
+            if self.robot_state == "SEARCHING":
+                prompt = ("Look at this image carefully. Is there a forklift visible in the image? "
+                         "Answer with 'YES' if you can see a forklift anywhere in the image, or 'NO' if you cannot see a forklift. "
+                         "Be specific and only answer YES or NO followed by a brief explanation.")
+            else:  # APPROACHING
+                prompt = ("Look at this image carefully. Is there a forklift visible in the image? "
+                         "Answer with 'YES' if you can still see the forklift, or 'NO' if you lost sight of it. "
+                         "If YES, also describe if the forklift appears close or far away. "
+                         "Be specific and only answer YES or NO followed by a brief explanation.")
             
             data = {
                 "model": self.model_name,
@@ -241,7 +253,7 @@ class Go2ForkliftController(Node):
                 # Check if response indicates forklift detection
                 forklift_found = response_text.upper().startswith('YES')
                 
-                self.get_logger().info(f"vLLM Response: {response_text}")
+                self.get_logger().info(f"vLLM Response ({self.robot_state}): {response_text}")
                 return forklift_found, response_text
             else:
                 self.get_logger().error(f"vLLM server error: {response.status_code} - {response.text}")
@@ -254,27 +266,27 @@ class Go2ForkliftController(Node):
             self.get_logger().error(f"Error detecting forklift: {e}")
             return False, str(e)
     
-    def move_forward(self):
-        """Send command to move robot forward."""
-        twist = Twist()
-        twist.linear.x = self.forward_speed
-        twist.linear.y = 0.0
-        twist.linear.z = 0.0
-        twist.angular.x = 0.0
-        twist.angular.y = 0.0
-        twist.angular.z = 0.0
-        
-        self.cmd_vel_pub.publish(twist)
-    
-    def turn_left(self):
-        """Send command to turn robot left."""
+    def rotate_in_place(self):
+        """Send command to rotate robot in place (counterclockwise)."""
         twist = Twist()
         twist.linear.x = 0.0
         twist.linear.y = 0.0
         twist.linear.z = 0.0
         twist.angular.x = 0.0
         twist.angular.y = 0.0
-        twist.angular.z = -self.turn_speed  # Positive Z = turn left
+        twist.angular.z = self.rotation_speed  # Positive Z = counterclockwise rotation
+        
+        self.cmd_vel_pub.publish(twist)
+    
+    def move_towards_forklift(self):
+        """Send command to move robot forward towards the forklift."""
+        twist = Twist()
+        twist.linear.x = self.approach_speed
+        twist.linear.y = 0.0
+        twist.linear.z = 0.0
+        twist.angular.x = 0.0
+        twist.angular.y = 0.0
+        twist.angular.z = 0.0
         
         self.cmd_vel_pub.publish(twist)
     
@@ -285,69 +297,78 @@ class Go2ForkliftController(Node):
         self.get_logger().info("Robot stopped!")
     
     def control_loop(self):
-        """Main control loop callback (10Hz) - implements search pattern."""
-        if not self.running or self.forklift_detected:
+        """Main control loop callback (10Hz) - implements search and approach behavior."""
+        if not self.running:
             self.stop_robot()
             return
         
         current_time = time.time()
         
-        if self.search_state == "FORWARD":
-            # Move forward
-            self.move_forward()
+        if self.robot_state == "SEARCHING":
+            # Rotate in place to search for forklift
+            self.rotate_in_place()
             
-            # Check if we should switch to turning
-            if current_time - self.last_forward_start >= self.search_timeout:
-                self.get_logger().info("No forklift found, switching to turn left...")
-                self.search_state = "TURNING"
-                self.turn_start_time = current_time
+        elif self.robot_state == "APPROACHING":
+            # Move towards the forklift
+            self.move_towards_forklift()
+            
+            # Check for approach timeout
+            if self.approach_start_time and (current_time - self.approach_start_time >= self.approach_timeout):
+                self.get_logger().info("Approach timeout reached, stopping robot.")
+                self.robot_state = "ARRIVED"
+                self.stop_robot()
+                self.detection_timer.cancel()
+                self.control_timer.cancel()
                 
-        elif self.search_state == "TURNING":
-            # Turn left
-            self.turn_left()
-            
-            # Check if we should switch back to forward
-            if current_time - self.turn_start_time >= self.turn_duration:
-                self.get_logger().info("Turn completed, resuming forward movement...")
-                self.search_state = "FORWARD"
-                self.last_forward_start = current_time
+        elif self.robot_state == "ARRIVED":
+            # Stop the robot
+            self.stop_robot()
     
     def detection_callback(self):
         """Forklift detection callback."""
-        if not self.running or self.forklift_detected:
+        if not self.running or self.robot_state == "ARRIVED":
             return
             
         if self.current_image is not None:
-            self.get_logger().info(f"Checking for forklift... (State: {self.search_state})")
+            self.get_logger().info(f"Checking for forklift... (State: {self.robot_state})")
             
             with self.image_lock:
                 image_copy = self.current_image.copy()
             
             forklift_found, response = self.detect_forklift(image_copy)
             
-            if forklift_found:
-                self.get_logger().info("🎉 FORKLIFT DETECTED! Stopping robot.")
-                self.get_logger().info(f"Detection details: {response}")
-                
-                # Save the detection image
-                saved_path = self.save_forklift_image(image_copy, response)
-                if saved_path:
-                    self.get_logger().info(f"Detection image saved to: {saved_path}")
-                
-                self.forklift_detected = True
-                self.stop_robot()
-                # Stop the detection timer
-                self.detection_timer.cancel()
-                # Optionally stop control timer too
-                self.control_timer.cancel()
-            else:
-                self.get_logger().info(f"No forklift detected, continuing search pattern... (State: {self.search_state})")
-                # Reset forward timer only if we're currently moving forward and just detected
-                if self.search_state == "FORWARD":
-                    # Optionally reset the search timeout when actively searching
-                    # Uncomment next line if you want to reset timer on each detection attempt
-                    # self.last_forward_start = time.time()
-                    pass
+            if self.robot_state == "SEARCHING":
+                if forklift_found:
+                    self.get_logger().info("🎉 FORKLIFT DETECTED! Switching to approach mode.")
+                    self.get_logger().info(f"Detection details: {response}")
+                    
+                    # Save the detection image
+                    saved_path = self.save_forklift_image(image_copy, response, self.robot_state)
+                    if saved_path:
+                        self.get_logger().info(f"Detection image saved to: {saved_path}")
+                    
+                    # Switch to approaching state
+                    self.robot_state = "APPROACHING"
+                    self.approach_start_time = time.time()
+                    self.forklift_detected = True
+                else:
+                    self.get_logger().info("No forklift detected, continuing to search (rotating)...")
+                    
+            elif self.robot_state == "APPROACHING":
+                if forklift_found:
+                    self.get_logger().info(f"Still tracking forklift, continuing approach... {response}")
+                    
+                    # Check if we should stop based on distance (if enabled and response indicates closeness)
+                    if self.stop_distance_check and ("close" in response.lower() or "near" in response.lower()):
+                        self.get_logger().info("Forklift appears close enough, stopping approach.")
+                        self.robot_state = "ARRIVED"
+                        self.stop_robot()
+                        self.detection_timer.cancel()
+                        self.control_timer.cancel()
+                else:
+                    self.get_logger().warn("Lost sight of forklift during approach! Switching back to search mode.")
+                    self.robot_state = "SEARCHING"
+                    self.approach_start_time = None
         else:
             self.get_logger().warn("No image available for detection")
 
@@ -357,10 +378,11 @@ def main(args=None):
     try:
         controller = Go2ForkliftController()
         
-        controller.get_logger().info("Starting forklift detection mission with search pattern...")
-        controller.get_logger().info(f"Forward speed: {controller.forward_speed} m/s, Turn speed: {controller.turn_speed} rad/s")
-        controller.get_logger().info(f"Search pattern: Forward for {controller.search_timeout}s, then turn left for {controller.turn_duration}s")
+        controller.get_logger().info("Starting forklift detection mission with search and approach behavior...")
+        controller.get_logger().info(f"Rotation speed: {controller.rotation_speed} rad/s, Approach speed: {controller.approach_speed} m/s")
+        controller.get_logger().info(f"Behavior: Rotate in place to find forklift -> Move towards forklift when detected")
         controller.get_logger().info(f"Checking for forklift every {controller.detection_interval} seconds")
+        controller.get_logger().info(f"Approach timeout: {controller.approach_timeout} seconds")
         
         # Spin the node
         rclpy.spin(controller)
@@ -400,51 +422,38 @@ def generate_launch_description():
             parameters=[{
                 'vllm_server_url': 'http://localhost:8000',
                 'model_name': 'llava-hf/llava-1.5-7b-hf',
-                'forward_speed': 0.5,  # m/s
-                'turn_speed': 0.5,  # rad/s for turning
+                'rotation_speed': 0.4,  # rad/s for searching rotation
+                'approach_speed': 0.2,  # m/s - slower approach speed
                 'detection_interval': 2.0,  # seconds
-                'search_timeout': 10.0,  # seconds before turning
-                'turn_duration': 3.0,  # seconds to turn left
+                'approach_timeout': 15.0,  # seconds to approach before stopping
                 'image_topic': '/unitree_go2/front_cam/color_image',
                 'cmd_vel_topic': '/cmd_vel',
                 'save_detection_image': True,  # whether to save detected image
-                'output_dir': './forklift_detections'  # directory to save images
+                'output_dir': './forklift_detections',  # directory to save images
+                'stop_distance_check': False  # whether to check if close enough to stop
             }]
         )
     ])
 """
 
 # ============================================================================
-# PACKAGE.XML DEPENDENCIES
+# USAGE INSTRUCTIONS FOR ROS2 - UPDATED BEHAVIOR
 # ============================================================================
 
 """
-Add these dependencies to your package.xml:
+UPDATED BEHAVIOR:
 
-<depend>rclpy</depend>
-<depend>sensor_msgs</depend>
-<depend>geometry_msgs</depend>
-<depend>cv_bridge</depend>
-<depend>opencv2</depend>
-"""
+PHASE 1 - SEARCHING:
+- Robot rotates in place (counterclockwise) at rotation_speed
+- vLLM continuously analyzes camera feed every detection_interval seconds
+- When forklift is detected, switches to PHASE 2
 
-# ============================================================================
-# SETUP.PY CONFIGURATION
-# ============================================================================
+PHASE 2 - APPROACHING:
+- Robot moves forward toward the detected forklift at approach_speed
+- vLLM continues to track the forklift to ensure it's still visible
+- If forklift is lost during approach, switches back to PHASE 1 (searching)
+- Stops after approach_timeout seconds or when close enough (if stop_distance_check enabled)
 
-"""
-Add this to your setup.py entry_points:
-
-'console_scripts': [
-    'controller = your_package_name.controller:main',
-],
-"""
-
-# ============================================================================
-# USAGE INSTRUCTIONS FOR ROS2
-# ============================================================================
-
-"""
 SETUP INSTRUCTIONS:
 
 1. Start vLLM Server on GPU 1 (Terminal 1):
@@ -457,32 +466,15 @@ SETUP INSTRUCTIONS:
 2. Start Isaac Sim with Go-2 robot (uses GPU 0)
 
 3. Run the controller (Terminal 2):
-   # Direct execution:
    python3 controller.py
-   
-   # OR with ROS2 run:
-   ros2 run your_package_name controller
-   
-   # OR with ROS2 launch:
-   ros2 launch your_package_name go2_forklift_controller.launch.py
 
-4. Monitor topics (optional):
-   # Check if image topic is publishing
-   ros2 topic echo /unitree_go2/front_cam/color_image
-   
-   # Check cmd_vel output
-   ros2 topic echo /cmd_vel
-   
-   # List all topics
-   ros2 topic list
+KEY PARAMETERS:
+- rotation_speed: How fast to rotate when searching (default: 0.4 rad/s)
+- approach_speed: How fast to move toward forklift (default: 0.2 m/s)
+- approach_timeout: Max time to approach before stopping (default: 15.0 s)
+- stop_distance_check: Whether to stop when forklift appears "close" (default: False)
 
-PARAMETERS (can be set via launch file or command line):
-ros2 run your_package_name controller --ros-args -p forward_speed:=0.3 -p detection_interval:=1.5
-
-ROS2 SPECIFIC FEATURES:
-- Uses QoS profiles for reliable image subscription
-- Timer-based control loop (10Hz) and detection loop (configurable interval)
-- Proper parameter declaration and retrieval
-- ROS2 logging system
-- Clean node lifecycle management
+MONITORING:
+ros2 topic echo /cmd_vel  # Monitor robot commands
+ros2 topic echo /unitree_go2/front_cam/color_image  # Check camera feed
 """

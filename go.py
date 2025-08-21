@@ -11,7 +11,9 @@ import base64
 import numpy as np
 import time
 import json
-import re
+import os
+from datetime import datetime
+from ultralytics import YOLO
 
 class Go2ForkliftController(Node):
     def __init__(self):
@@ -40,6 +42,20 @@ class Go2ForkliftController(Node):
         # VLLM server configuration
         self.vllm_url = "http://localhost:8000/v1/chat/completions"
         
+        # YOLO model initialization
+        try:
+            # You can use different YOLO models:
+            # - yolov8n.pt (nano, fastest)
+            # - yolov8s.pt (small)
+            # - yolov8m.pt (medium)
+            # - yolov8l.pt (large)
+            # - yolov8x.pt (extra large, most accurate)
+            self.yolo_model = YOLO('yolov8n.pt')  # Using nano for speed
+            self.get_logger().info("YOLO model loaded successfully")
+        except Exception as e:
+            self.get_logger().error(f"Failed to load YOLO model: {e}")
+            self.yolo_model = None
+        
         # Control variables
         self.current_image = None
         self.current_depth_image = None
@@ -47,32 +63,17 @@ class Go2ForkliftController(Node):
         self.forklift_centered = False
         self.distance_measured = False
         self.is_moving = False
-        self.search_phase = True  # True = searching, False = centering
-        
-        # Movement parameters
-        self.angular_velocity = 0.5  # rad/s for rotation during search
-        self.centering_angular_velocity = 0.15  # slower rotation for centering
-        self.linear_velocity = 0.15   # m/s for forward/backward during centering
-        self.detection_interval = 2.0  # seconds between detections during search
-        self.centering_interval = 1.5  # seconds between centering attempts
-        
-        # Centering parameters
-        self.max_centering_attempts = 15  # max attempts before declaring success
-        self.current_centering_attempts = 0
-        
-        # Movement step sizes for centering
-        self.rotation_step_time = 0.8  # seconds to rotate in one direction
-        self.movement_step_time = 0.6  # seconds to move forward/backward
-        
-        # Current centering state
-        self.centering_action = None  # 'rotate_left', 'rotate_right', 'move_forward', 'move_backward', 'stop'
-        self.action_start_time = 0
-        
-        # Distance measurement variables
-        self.forklift_distance = None
         self.forklift_bbox = None
         
-        # Timer for periodic operations
+        # Movement parameters
+        self.angular_velocity = 0.5  # rad/s for rotation
+        self.detection_interval = 2.0  # seconds between detections
+        
+        # Create output directory for saved images
+        self.output_dir = "forklift_detections"
+        os.makedirs(self.output_dir, exist_ok=True)
+        
+        # Timer for periodic forklift detection
         self.detection_timer = self.create_timer(
             self.detection_interval, 
             self.check_for_forklift
@@ -183,326 +184,131 @@ class Go2ForkliftController(Node):
             self.get_logger().error(f"Error in forklift detection: {e}")
             return False
     
-    def get_forklift_bounding_box(self, image):
-        """Get bounding box coordinates of the forklift using VLLM with percentage values"""
+    def detect_forklift_with_yolo(self, image):
+        """Use YOLO to detect forklift and get bounding box"""
+        if self.yolo_model is None:
+            self.get_logger().warn("YOLO model not available")
+            return None
+        
         try:
-            # Encode image
-            image_base64 = self.encode_image_to_base64(image)
-            if not image_base64:
-                return None
+            # Run YOLO inference
+            results = self.yolo_model(image, verbose=False)
             
-            # Prepare the request payload for bounding box detection with percentage values
-            payload = {
-                "model": "llava-hf/llava-1.5-7b-hf",
-                "messages": [
-                    {
-                        "role": "user",
-                        "content": [
-                            {
-                                "type": "text",
-                                "text": "Look at this image and identify the forklift. Please provide the bounding box of the forklift as percentage values of the image dimensions. Format: x1_percent,y1_percent,x2_percent,y2_percent where (x1,y1) is the top-left corner and (x2,y2) is the bottom-right corner. Each value should be between 0 and 100 representing the percentage from left/top of the image. Only provide the four percentage numbers separated by commas, nothing else. For example: 25.5,30.2,75.8,85.1"
-                            },
-                            {
-                                "type": "image_url",
-                                "image_url": {
-                                    "url": image_base64
-                                }
+            # Process results
+            for result in results:
+                boxes = result.boxes
+                if boxes is not None:
+                    for box in boxes:
+                        # Get class information
+                        class_id = int(box.cls[0])
+                        class_name = self.yolo_model.names[class_id].lower()
+                        confidence = float(box.conf[0])
+                        
+                        # Check if it's a forklift or related vehicle
+                        # YOLO COCO classes that might be relevant:
+                        # - truck (class 7)
+                        # - bus (class 5) - sometimes misclassified
+                        # You might need to adjust this based on your specific needs
+                        forklift_related_classes = ['truck', 'bus', 'car']  # Add more as needed
+                        
+                        if (class_name in forklift_related_classes and confidence > 0.3) or \
+                           ('fork' in class_name.lower()):
+                            # Get bounding box coordinates
+                            x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
+                            
+                            bbox_info = {
+                                'x1': int(x1),
+                                'y1': int(y1), 
+                                'x2': int(x2),
+                                'y2': int(y2),
+                                'confidence': confidence,
+                                'class': class_name,
+                                'center_x': int((x1 + x2) / 2),
+                                'center_y': int((y1 + y2) / 2),
+                                'width': int(x2 - x1),
+                                'height': int(y2 - y1)
                             }
-                        ]
-                    }
-                ],
-                "max_tokens": 50,
-                "temperature": 0.1
-            }
+                            
+                            self.get_logger().info(f"Detected {class_name} with confidence {confidence:.2f}")
+                            return bbox_info
             
-            # Send request to VLLM server
-            response = requests.post(
-                self.vllm_url,
-                headers={"Content-Type": "application/json"},
-                json=payload,
-                timeout=12
-            )
+            return None
             
-            if response.status_code == 200:
-                result = response.json()
-                answer = result['choices'][0]['message']['content'].strip()
-                
-                self.get_logger().info(f"Bounding Box Percentage Response: {answer}")
-                return self.parse_percentage_bounding_box(answer, image.shape, image)
-            else:
-                self.get_logger().error(f"VLLM server error: {response.status_code}")
-                return None
-                
         except Exception as e:
-            self.get_logger().error(f"Error in bounding box detection: {e}")
+            self.get_logger().error(f"Error in YOLO detection: {e}")
             return None
     
-    def parse_percentage_bounding_box(self, response, image_shape, img):
-        """Parse the percentage bounding box response and convert to pixel coordinates"""
+    def draw_bounding_box(self, image, bbox_info):
+        """Draw bounding box on image"""
+        if bbox_info is None:
+            return image
+        
+        # Make a copy of the image
+        annotated_image = image.copy()
+        
+        # Extract coordinates
+        x1, y1, x2, y2 = bbox_info['x1'], bbox_info['y1'], bbox_info['x2'], bbox_info['y2']
+        confidence = bbox_info['confidence']
+        class_name = bbox_info['class']
+        
+        # Draw bounding box
+        cv2.rectangle(annotated_image, (x1, y1), (x2, y2), (0, 255, 0), 2)
+        
+        # Draw center point
+        center_x, center_y = bbox_info['center_x'], bbox_info['center_y']
+        cv2.circle(annotated_image, (center_x, center_y), 5, (0, 0, 255), -1)
+        
+        # Add text label
+        label = f"{class_name}: {confidence:.2f}"
+        label_size = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)[0]
+        
+        # Draw background for text
+        cv2.rectangle(annotated_image, 
+                     (x1, y1 - label_size[1] - 10), 
+                     (x1 + label_size[0], y1), 
+                     (0, 255, 0), -1)
+        
+        # Draw text
+        cv2.putText(annotated_image, label, 
+                   (x1, y1 - 5), 
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 2)
+        
+        return annotated_image
+    
+    def save_detection_image(self, image, bbox_info):
+        """Save the image with bounding box"""
         try:
-            # Extract floating point numbers from the response
-            numbers = re.findall(r'\d+\.?\d*', response)
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            filename = f"forklift_detection_{timestamp}.jpg"
+            filepath = os.path.join(self.output_dir, filename)
             
-            if len(numbers) < 4:
-                self.get_logger().error(f"Not enough coordinates found in response: {response}")
-                return None
+            # Draw bounding box on image
+            annotated_image = self.draw_bounding_box(image, bbox_info)
             
-            # Take the first 4 numbers as percentage coordinates
-            x1_pct, y1_pct, x2_pct, y2_pct = map(float, numbers[:4])
+            # Save the image
+            cv2.imwrite(filepath, annotated_image)
             
-            self.get_logger().info(f"Parsed percentage coordinates: ({x1_pct:.1f}%, {y1_pct:.1f}%, {x2_pct:.1f}%, {y2_pct:.1f}%)")
-            
-            # Get image dimensions
-            height, width = image_shape[:2]
-            
-            # Convert percentages to pixel coordinates
-            x1 = int((x1_pct / 100.0) * width)
-            y1 = int((y1_pct / 100.0) * height)
-            x2 = int((x2_pct / 100.0) * width)
-            y2 = int((y2_pct / 100.0) * height)
-            
-            # Validate and clamp coordinates
-            x1 = max(0, min(x1, width - 1))
-            y1 = max(0, min(y1, height - 1))
-            x2 = max(0, min(x2, width - 1))
-            y2 = max(0, min(y2, height - 1))
-            
-            # Ensure x2 > x1 and y2 > y1
-            if x2 <= x1 or y2 <= y1:
-                self.get_logger().error(f"Invalid bounding box coordinates: ({x1},{y1},{x2},{y2})")
-                return None
-            
-            bbox = {
-                'x1': x1,
-                'y1': y1,
-                'x2': x2,
-                'y2': y2,
-                'width': x2 - x1,
-                'height': y2 - y1,
-                'x1_pct': x1_pct,
-                'y1_pct': y1_pct,
-                'x2_pct': x2_pct,
-                'y2_pct': y2_pct
-            }
-
-            if bbox:
-                # Draw rectangle
-                img_with_bbox = img.copy()
-                cv2.rectangle(
-                    img_with_bbox,
-                    (bbox['x1'], bbox['y1']),
-                    (bbox['x2'], bbox['y2']),
-                    (0, 255, 0), 3
-                )
-                # Save image with bounding box
-                save_path = "forklift_bbox.jpg"
-                cv2.imwrite(save_path, img_with_bbox)
-                self.get_logger().info(f"Saved image with bounding box to {save_path}")
-            
-            self.get_logger().info(f"Converted to pixel coordinates: ({x1},{y1},{x2},{y2}) - Size: {bbox['width']}x{bbox['height']} pixels")
-            return bbox
+            self.get_logger().info(f"Detection image saved: {filepath}")
+            return filepath
             
         except Exception as e:
-            self.get_logger().error(f"Error parsing percentage bounding box: {e}")
+            self.get_logger().error(f"Error saving detection image: {e}")
             return None
     
-    def measure_forklift_distance(self):
-        """Measure distance to forklift using depth image and percentage-based bounding box"""
-        if self.current_depth_image is None or self.forklift_bbox is None:
-            self.get_logger().warn("Cannot measure distance - missing depth image or bounding box")
-            return None
+    def print_bbox_coordinates(self, bbox_info):
+        """Print detailed bounding box information"""
+        if bbox_info is None:
+            return
         
-        try:
-            # Get depth image dimensions
-            depth_height, depth_width = self.current_depth_image.shape[:2]
-            
-            # Calculate pixel coordinates directly from percentages for depth image
-            x1 = int((self.forklift_bbox['x1_pct'] / 100.0) * depth_width)
-            y1 = int((self.forklift_bbox['y1_pct'] / 100.0) * depth_height)
-            x2 = int((self.forklift_bbox['x2_pct'] / 100.0) * depth_width)
-            y2 = int((self.forklift_bbox['y2_pct'] / 100.0) * depth_height)
-            
-            # Validate and clamp coordinates for depth image
-            x1 = max(0, min(x1, depth_width - 1))
-            y1 = max(0, min(y1, depth_height - 1))
-            x2 = max(0, min(x2, depth_width - 1))
-            y2 = max(0, min(y2, depth_height - 1))
-            
-            # Ensure valid bounding box
-            if x2 <= x1 or y2 <= y1:
-                self.get_logger().error(f"Invalid depth bounding box: ({x1},{y1},{x2},{y2})")
-                return None
-            
-            self.get_logger().info(f"Depth image bounding box: ({x1},{y1},{x2},{y2}) - Size: {x2-x1}x{y2-y1} pixels")
-            self.get_logger().info(f"Depth image dimensions: {depth_width}x{depth_height}")
-            
-            # Extract the region of interest from depth image
-            roi_depth = self.current_depth_image[y1:y2, x1:x2]
-            
-            if roi_depth.size == 0:
-                self.get_logger().error("Empty ROI in depth image")
-                return None
-            
-            # Filter out zero/invalid depth values
-            valid_depths = roi_depth[roi_depth > 0]
-            
-            if len(valid_depths) == 0:
-                self.get_logger().warn("No valid depth values in forklift region")
-                return None
-            
-            # Calculate median distance (more robust than mean)
-            median_distance = np.median(valid_depths)
-            
-            # Calculate additional statistics
-            min_distance = np.min(valid_depths)
-            max_distance = np.max(valid_depths)
-            mean_distance = np.mean(valid_depths)
-            
-            # Convert to meters if the depth is in millimeters (common for depth cameras)
-            if median_distance > 100:  # Assume millimeters if value > 100
-                distance_meters = median_distance / 1000.0
-                min_meters = min_distance / 1000.0
-                max_meters = max_distance / 1000.0
-                mean_meters = mean_distance / 1000.0
-                unit = "mm->m"
-            else:  # Assume already in meters
-                distance_meters = median_distance
-                min_meters = min_distance
-                max_meters = max_distance
-                mean_meters = mean_distance
-                unit = "m"
-            
-            self.get_logger().info(f"📏 FORKLIFT DISTANCE MEASURED:")
-            self.get_logger().info(f"   Percentage bbox: ({self.forklift_bbox['x1_pct']:.1f}%, {self.forklift_bbox['y1_pct']:.1f}%, {self.forklift_bbox['x2_pct']:.1f}%, {self.forklift_bbox['y2_pct']:.1f}%)")
-            self.get_logger().info(f"   Depth bbox pixels: ({x1},{y1},{x2},{y2})")
-            self.get_logger().info(f"   Median distance: {distance_meters:.2f} meters ({unit})")
-            self.get_logger().info(f"   Distance range: {min_meters:.2f} - {max_meters:.2f} meters")
-            self.get_logger().info(f"   Mean distance: {mean_meters:.2f} meters")
-            self.get_logger().info(f"   Valid depth points: {len(valid_depths)}/{roi_depth.size}")
-            self.get_logger().info(f"   Region size: {x2-x1}x{y2-y1} pixels")
-            
-            return distance_meters
-            
-        except Exception as e:
-            self.get_logger().error(f"Error measuring forklift distance: {e}")
-            return None
-    
-    def analyze_forklift_position(self, image):
-        """Analyze forklift position and distance for centering guidance"""
-        try:
-            # Encode image
-            image_base64 = self.encode_image_to_base64(image)
-            if not image_base64:
-                return None
-            
-            # Prepare the request payload for position analysis
-            payload = {
-                "model": "llava-hf/llava-1.5-7b-hf",
-                "messages": [
-                    {
-                        "role": "user",
-                        "content": [
-                            {
-                                "type": "text",
-                                "text": "Look at this image with a forklift. Answer these questions:\n1. Is the forklift positioned more towards the LEFT, RIGHT, or CENTER of the image?\n2. Does the forklift appear CLOSE, MEDIUM, or FAR from the camera?\n3. Is the forklift well-centered in the image? Answer YES or NO.\n\nProvide your answer in this exact format:\nPosition: [LEFT/RIGHT/CENTER]\nDistance: [CLOSE/MEDIUM/FAR]\nCentered: [YES/NO]"
-                            },
-                            {
-                                "type": "image_url",
-                                "image_url": {
-                                    "url": image_base64
-                                }
-                            }
-                        ]
-                    }
-                ],
-                "max_tokens": 50,
-                "temperature": 0.1
-            }
-            
-            # Send request to VLLM server
-            response = requests.post(
-                self.vllm_url,
-                headers={"Content-Type": "application/json"},
-                json=payload,
-                timeout=12
-            )
-            
-            if response.status_code == 200:
-                result = response.json()
-                answer = result['choices'][0]['message']['content'].strip()
-                
-                self.get_logger().info(f"Position Analysis: {answer}")
-                return self.parse_position_analysis(answer)
-            else:
-                self.get_logger().error(f"VLLM server error: {response.status_code}")
-                return None
-                
-        except Exception as e:
-            self.get_logger().error(f"Error in position analysis: {e}")
-            return None
-    
-    def parse_position_analysis(self, response):
-        """Parse the position analysis response"""
-        try:
-            analysis = {
-                'position': 'CENTER',
-                'distance': 'MEDIUM', 
-                'centered': False
-            }
-            
-            response_upper = response.upper()
-            
-            # Parse position
-            if 'LEFT' in response_upper:
-                analysis['position'] = 'LEFT'
-            elif 'RIGHT' in response_upper:
-                analysis['position'] = 'RIGHT'
-            else:
-                analysis['position'] = 'CENTER'
-            
-            # Parse distance
-            if 'CLOSE' in response_upper:
-                analysis['distance'] = 'CLOSE'
-            elif 'FAR' in response_upper:
-                analysis['distance'] = 'FAR'
-            else:
-                analysis['distance'] = 'MEDIUM'
-            
-            # Parse centered status
-            if 'CENTERED: YES' in response_upper or 'CENTERED:YES' in response_upper:
-                analysis['centered'] = True
-            
-            return analysis
-            
-        except Exception as e:
-            self.get_logger().error(f"Error parsing position analysis: {e}")
-            return None
-    
-    def determine_centering_action(self, analysis):
-        """Determine what action to take based on position analysis"""
-        if not analysis:
-            return 'stop'
-        
-        # Check if already centered
-        if analysis['centered']:
-            return 'stop'
-        
-        # Prioritize horizontal centering first
-        if analysis['position'] == 'LEFT':
-            return 'rotate_left'
-        elif analysis['position'] == 'RIGHT':
-            return 'rotate_right'
-        
-        # If horizontally centered, adjust distance
-        if analysis['position'] == 'CENTER':
-            if analysis['distance'] == 'CLOSE':
-                return 'move_backward'
-            elif analysis['distance'] == 'FAR':
-                return 'move_forward'
-            else:
-                return 'stop'  # Well centered
-        
-        return 'stop'
+        self.get_logger().info("=" * 50)
+        self.get_logger().info("FORKLIFT BOUNDING BOX COORDINATES:")
+        self.get_logger().info(f"  Class: {bbox_info['class']}")
+        self.get_logger().info(f"  Confidence: {bbox_info['confidence']:.3f}")
+        self.get_logger().info(f"  Top-left corner (x1, y1): ({bbox_info['x1']}, {bbox_info['y1']})")
+        self.get_logger().info(f"  Bottom-right corner (x2, y2): ({bbox_info['x2']}, {bbox_info['y2']})")
+        self.get_logger().info(f"  Center point (x, y): ({bbox_info['center_x']}, {bbox_info['center_y']})")
+        self.get_logger().info(f"  Width x Height: {bbox_info['width']} x {bbox_info['height']} pixels")
+        self.get_logger().info("=" * 50)
     
     def check_for_forklift(self):
         """Periodic check for forklift in current image"""
@@ -513,22 +319,44 @@ class Go2ForkliftController(Node):
             # Search phase - look for forklift
             self.get_logger().info("Searching for forklift...")
             
-            if self.detect_forklift_simple(self.current_image):
-                self.get_logger().info("🎯 FORKLIFT DETECTED! Starting centering process...")
-                self.forklift_detected = True
-                self.search_phase = False
-                self.current_centering_attempts = 0
+            # First use VLLM for initial detection
+            if self.detect_forklift_with_vllm(self.current_image):
+                self.get_logger().info("🎯 FORKLIFT DETECTED by VLLM! Stopping robot immediately...")
                 
-                # Switch to centering mode
-                self.detection_timer.destroy()
-                self.detection_timer = self.create_timer(
-                    self.centering_interval, 
-                    self.center_forklift
-                )
-                
-                # Stop current rotation movement
+                # STOP ROBOT FIRST to prevent further rotation
                 self.stop_robot()
-                time.sleep(0.5)  # Brief pause before starting centering
+                
+                # Wait a moment for robot to fully stop
+                time.sleep(0.5)
+                
+                # Capture a fresh image after stopping
+                detection_image = self.current_image.copy() if self.current_image is not None else None
+                
+                if detection_image is not None:
+                    self.get_logger().info("Running YOLO for bounding box detection...")
+                    
+                    # Use YOLO to get bounding box on the stopped image
+                    bbox_info = self.detect_forklift_with_yolo(detection_image)
+                    
+                    if bbox_info is not None:
+                        self.forklift_bbox = bbox_info
+                        self.print_bbox_coordinates(bbox_info)
+                        
+                        # Save image with bounding box
+                        saved_path = self.save_detection_image(detection_image, bbox_info)
+                        if saved_path:
+                            self.get_logger().info(f"📸 Detection image saved to: {saved_path}")
+                        
+                        self.forklift_detected = True
+                        self.get_logger().info("✅ Forklift detection and bounding box analysis complete!")
+                    else:
+                        self.get_logger().warn("VLLM detected forklift but YOLO couldn't find bounding box.")
+                        self.get_logger().warn("This might be a false positive. Resuming search...")
+                        # Reset detection flag to continue searching
+                        self.forklift_detected = False
+                else:
+                    self.get_logger().error("No image available after stopping robot")
+                    self.forklift_detected = False
             else:
                 self.get_logger().info("No forklift detected, continuing search...")
     
@@ -682,11 +510,17 @@ class Go2ForkliftController(Node):
         cmd.angular.z = 0.0
         
         # Send stop command multiple times to ensure it's received
-        for _ in range(3):
+        for _ in range(10):  # Increased from 5 to 10 for more reliable stopping
             self.cmd_vel_pub.publish(cmd)
-            time.sleep(0.05)
+            time.sleep(0.05)  # Shorter intervals but more iterations
         
-        self.is_moving = False
+        self.get_logger().info("Robot stopped successfully!")
+        self.is_moving = False  # Reset movement flag
+        
+        # Print final detection summary
+        if self.forklift_bbox is not None:
+            self.get_logger().info("\n🎉 FORKLIFT DETECTION COMPLETE!")
+            self.print_bbox_coordinates(self.forklift_bbox)
 
 def main(args=None):
     # Initialize ROS2

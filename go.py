@@ -28,14 +28,6 @@ class Go2ForkliftController(Node):
             10
         )
         
-        # Depth image subscriber
-        self.depth_sub = self.create_subscription(
-            Image,
-            '/unitree_go2/front_cam/depth_image',
-            self.depth_callback,
-            10
-        )
-        
         # CV Bridge for image conversion
         self.bridge = CvBridge()
         
@@ -58,10 +50,7 @@ class Go2ForkliftController(Node):
         
         # Control variables
         self.current_image = None
-        self.current_depth_image = None
         self.forklift_detected = False
-        self.forklift_centered = False
-        self.distance_measured = False
         self.is_moving = False
         self.forklift_bbox = None
         
@@ -82,7 +71,7 @@ class Go2ForkliftController(Node):
         # Timer for movement control
         self.movement_timer = self.create_timer(0.1, self.movement_control)
         
-        self.get_logger().info("Go-2 Forklift Controller with Depth Measurement initialized")
+        self.get_logger().info("Go-2 Forklift Controller initialized")
         self.get_logger().info("Starting rotation to search for forklift...")
         
     def image_callback(self, msg):
@@ -92,21 +81,6 @@ class Go2ForkliftController(Node):
             self.current_image = self.bridge.imgmsg_to_cv2(msg, "bgr8")
         except Exception as e:
             self.get_logger().error(f"Error converting image: {e}")
-    
-    def depth_callback(self, msg):
-        """Callback for receiving depth images"""
-        try:
-            # Convert ROS depth image to OpenCV format
-            # Depth images are typically in 16UC1 or 32FC1 format
-            if msg.encoding == "16UC1":
-                self.current_depth_image = self.bridge.imgmsg_to_cv2(msg, "16UC1")
-            elif msg.encoding == "32FC1":
-                self.current_depth_image = self.bridge.imgmsg_to_cv2(msg, "32FC1")
-            else:
-                # Try passthrough for other formats
-                self.current_depth_image = self.bridge.imgmsg_to_cv2(msg, "passthrough")
-        except Exception as e:
-            self.get_logger().error(f"Error converting depth image: {e}")
     
     def encode_image_to_base64(self, image):
         """Convert OpenCV image to base64 string for VLLM API"""
@@ -120,7 +94,7 @@ class Go2ForkliftController(Node):
                 image = cv2.resize(image, (new_width, new_height))
             
             # Encode image as JPEG
-            _, buffer = cv2.imencode('.jpg', image, [cv2.IMWRITE_JPEG_QUALITY, 85])
+            _, buffer = cv2.imencode('.jpg', image, [cv2.IMWRITE_JPEG_QUALITY, 80])
             
             # Convert to base64
             image_base64 = base64.b64encode(buffer).decode('utf-8')
@@ -130,8 +104,8 @@ class Go2ForkliftController(Node):
             self.get_logger().error(f"Error encoding image: {e}")
             return None
     
-    def detect_forklift_simple(self, image):
-        """Simple forklift detection - just check if forklift is present"""
+    def detect_forklift_with_vllm(self, image):
+        """Use VLLM server to detect forklift in image"""
         try:
             # Encode image
             image_base64 = self.encode_image_to_base64(image)
@@ -147,7 +121,7 @@ class Go2ForkliftController(Node):
                         "content": [
                             {
                                 "type": "text",
-                                "text": "Look at this image. Is there a forklift visible? Answer with only 'YES' if you can see a forklift, or 'NO' if you cannot see a forklift. A forklift is an industrial vehicle with two prongs/forks at the front for lifting pallets."
+                                "text": "Look at this image carefully. Is there a forklift visible in this image? Answer with only 'YES' if you can see a forklift, or 'NO' if you cannot see a forklift. Be very specific - a forklift is an industrial vehicle with two prongs/forks at the front for lifting pallets."
                             },
                             {
                                 "type": "image_url",
@@ -174,12 +148,17 @@ class Go2ForkliftController(Node):
                 result = response.json()
                 answer = result['choices'][0]['message']['content'].strip().upper()
                 
-                self.get_logger().info(f"Forklift Detection: {answer}")
+                self.get_logger().info(f"VLLM Response: {answer}")
+                
+                # Check if forklift is detected
                 return "YES" in answer
             else:
                 self.get_logger().error(f"VLLM server error: {response.status_code}")
                 return False
                 
+        except requests.exceptions.RequestException as e:
+            self.get_logger().error(f"Request to VLLM server failed: {e}")
+            return False
         except Exception as e:
             self.get_logger().error(f"Error in forklift detection: {e}")
             return False
@@ -312,12 +291,8 @@ class Go2ForkliftController(Node):
     
     def check_for_forklift(self):
         """Periodic check for forklift in current image"""
-        if self.current_image is None:
-            return
-        
-        if self.search_phase and not self.forklift_detected:
-            # Search phase - look for forklift
-            self.get_logger().info("Searching for forklift...")
+        if self.current_image is not None and not self.forklift_detected:
+            self.get_logger().info("Checking for forklift...")
             
             # First use VLLM for initial detection
             if self.detect_forklift_with_vllm(self.current_image):
@@ -360,111 +335,10 @@ class Go2ForkliftController(Node):
             else:
                 self.get_logger().info("No forklift detected, continuing search...")
     
-    def center_forklift(self):
-        """Center the forklift using incremental movements with LLM guidance"""
-        if self.current_image is None or self.forklift_centered:
-            return
-        
-        # Check if we've exceeded max attempts
-        if self.current_centering_attempts >= self.max_centering_attempts:
-            self.get_logger().info("🎉 CENTERING COMPLETE! (Max attempts reached)")
-            self.forklift_centered = True
-            self.stop_robot()
-            self.detection_timer.destroy()
-            # Proceed to distance measurement
-            self.start_distance_measurement()
-            return
-        
-        # First, verify forklift is still visible
-        if not self.detect_forklift_simple(self.current_image):
-            self.get_logger().warn("Lost forklift during centering! Returning to search mode...")
-            self.forklift_detected = False
-            self.search_phase = True
-            self.centering_action = None
-            
-            # Switch back to search timer
-            self.detection_timer.destroy()
-            self.detection_timer = self.create_timer(
-                self.detection_interval, 
-                self.check_for_forklift
-            )
-            return
-        
-        # Analyze current position
-        analysis = self.analyze_forklift_position(self.current_image)
-        if not analysis:
-            self.get_logger().warn("Could not analyze forklift position, retrying...")
-            return
-        
-        # Check if centering is complete
-        if analysis['centered']:
-            self.get_logger().info("🎉 FORKLIFT SUCCESSFULLY CENTERED!")
-            self.forklift_centered = True
-            self.stop_robot()
-            self.detection_timer.destroy()
-            # Proceed to distance measurement
-            self.start_distance_measurement()
-            return
-        
-        # Determine next action
-        action = self.determine_centering_action(analysis)
-        
-        self.get_logger().info(
-            f"Centering attempt {self.current_centering_attempts + 1}/{self.max_centering_attempts} - "
-            f"Position: {analysis['position']}, Distance: {analysis['distance']}, "
-            f"Action: {action}"
-        )
-        
-        # Execute the centering action
-        self.execute_centering_action(action)
-        self.current_centering_attempts += 1
-    
-    def start_distance_measurement(self):
-        """Start the distance measurement process"""
-        if self.distance_measured:
-            return
-        
-        self.get_logger().info("🎯 Starting distance measurement process...")
-        
-        # Get forklift bounding box
-        self.forklift_bbox = self.get_forklift_bounding_box(self.current_image)
-        
-        if self.forklift_bbox is None:
-            self.get_logger().error("Failed to get forklift bounding box. Cannot measure distance.")
-            return
-        
-        # Measure distance using depth image
-        self.forklift_distance = self.measure_forklift_distance()
-        
-        if self.forklift_distance is not None:
-            self.distance_measured = True
-            self.get_logger().info(f"✅ TASK COMPLETE! Forklift distance: {self.forklift_distance:.2f} meters")
-        else:
-            self.get_logger().error("Failed to measure forklift distance")
-    
-    def execute_centering_action(self, action):
-        """Execute a specific centering action"""
-        self.centering_action = action
-        self.action_start_time = time.time()
-        
-        if action == 'rotate_left':
-            self.get_logger().info("📍 Rotating left to center forklift...")
-        elif action == 'rotate_right':
-            self.get_logger().info("📍 Rotating right to center forklift...")
-        elif action == 'move_forward':
-            self.get_logger().info("📍 Moving forward to adjust distance...")
-        elif action == 'move_backward':
-            self.get_logger().info("📍 Moving backward to adjust distance...")
-        elif action == 'stop':
-            self.get_logger().info("📍 Forklift appears centered, stopping...")
-            self.centering_action = None
-    
     def movement_control(self):
-        """Control robot movement based on current phase and action"""
-        current_time = time.time()
-        
-        if self.search_phase and not self.forklift_detected:
-            # Search phase - rotate to find forklift
+        """Control robot movement"""
+        if not self.forklift_detected:
+            # Rotate the robot to search for forklift
             cmd = Twist()
             cmd.angular.z = self.angular_velocity
             self.cmd_vel_pub.publish(cmd)
@@ -472,32 +346,6 @@ class Go2ForkliftController(Node):
             if not self.is_moving:
                 self.get_logger().info("Rotating to search for forklift...")
                 self.is_moving = True
-                
-        elif self.centering_action and not self.forklift_centered:
-            # Centering phase - execute specific actions
-            cmd = Twist()
-            action_duration = 0
-            
-            if self.centering_action == 'rotate_left':
-                cmd.angular.z = self.centering_angular_velocity
-                action_duration = self.rotation_step_time
-            elif self.centering_action == 'rotate_right':
-                cmd.angular.z = -self.centering_angular_velocity
-                action_duration = self.rotation_step_time
-            elif self.centering_action == 'move_forward':
-                cmd.linear.x = self.linear_velocity
-                action_duration = self.movement_step_time
-            elif self.centering_action == 'move_backward':
-                cmd.linear.x = -self.linear_velocity
-                action_duration = self.movement_step_time
-            
-            # Execute action for specified duration
-            if current_time - self.action_start_time < action_duration:
-                self.cmd_vel_pub.publish(cmd)
-            else:
-                # Action completed, stop and wait for next analysis
-                self.stop_robot()
-                self.centering_action = None
     
     def stop_robot(self):
         """Stop the robot completely"""

@@ -14,6 +14,8 @@ import json
 import os
 from datetime import datetime
 from ultralytics import YOLO
+from geometry_msgs.msg import PoseStamped
+import math
 
 class Go2ForkliftController(Node):
     def __init__(self):
@@ -33,6 +35,18 @@ class Go2ForkliftController(Node):
             self.depth_image_callback, 
             10
         )
+        self.pose_sub = self.create_subscription(
+            PoseStamped,
+            '/unitree_go2/pose',
+            self.pose_callback,
+            10
+        )
+
+        self.current_pose = None
+        self.initial_position = None
+        self.target_distance = None
+        self.is_moving_forward = False
+        self.forward_velocity = 0.8  
 
         # CV Bridge for image conversion
         self.bridge = CvBridge()
@@ -80,6 +94,19 @@ class Go2ForkliftController(Node):
         
         self.get_logger().info("Go-2 Forklift Controller initialized")
         self.get_logger().info("Starting rotation to search for forklift...")
+    
+    def pose_callback(self, msg):
+        """Callback for receiving robot pose"""
+        self.current_pose = msg
+    
+    def calculate_travel_distance(self, initial_pos, current_pos):
+        """Calculate 2D distance traveled from initial position"""
+        if initial_pos is None or current_pos is None:
+            return 0.0
+        
+        dx = current_pos.x - initial_pos.x
+        dy = current_pos.y - initial_pos.y
+        return math.sqrt(dx*dx + dy*dy)
         
     def image_callback(self, msg):
         """Callback for receiving camera images"""
@@ -272,7 +299,7 @@ class Go2ForkliftController(Node):
                         # - truck (class 7)
                         # - bus (class 5) - sometimes misclassified
                         # You might need to adjust this based on your specific needs
-                        forklift_related_classes = ['truck', 'bus', 'car']  # Add more as needed
+                        forklift_related_classes = ['truck', 'bus', 'car', 'train', '']  # Add more as needed
                         
                         if (class_name in forklift_related_classes and confidence > 0.3) or \
                            ('fork' in class_name.lower()):
@@ -380,7 +407,7 @@ class Go2ForkliftController(Node):
             
             # First use VLLM for initial detection
             if self.detect_forklift_with_vllm(self.current_image):
-                self.get_logger().info("🎯 FORKLIFT DETECTED by VLLM! Stopping robot immediately...")
+                self.get_logger().info("FORKLIFT DETECTED by VLLM! Stopping robot immediately...")
                 
                 # STOP ROBOT FIRST to prevent further rotation
                 self.stop_robot()
@@ -413,6 +440,18 @@ class Go2ForkliftController(Node):
                             self.get_logger().warn("No depth image available for distance calculation")
                         
                         self.print_bbox_coordinates(bbox_info)
+
+                        # Save current position and start forward movement
+                        if self.current_pose is not None and distance is not None:
+                            # Save initial position for distance tracking
+                            self.initial_position = self.current_pose.pose.position
+                            self.target_distance = distance - 0.5  # Stop 0.5m before forklift (safety margin)
+                            self.is_moving_forward = True
+                            
+                            self.get_logger().info(f"Starting forward movement to cover {self.target_distance:.2f} meters")
+                            self.get_logger().info(f"Initial position: x={self.initial_position.x:.2f}, y={self.initial_position.y:.2f}")
+                        else:
+                            self.get_logger().warn("Cannot start forward movement - missing pose or distance data")
                         
                         # Save image with bounding box
                         saved_path = self.save_detection_image(detection_image, bbox_info)
@@ -434,15 +473,43 @@ class Go2ForkliftController(Node):
     
     def movement_control(self):
         """Control robot movement"""
-        if not self.forklift_detected:
-            # Rotate the robot to search for forklift
-            cmd = Twist()
+        cmd = Twist()
+        if self.is_moving_forward and self.forklift_detected:
+            # Moving forward towards forklift
+            if self.current_pose is not None and self.initial_position is not None:
+                # Calculate distance traveled
+                travel_distance = self.calculate_travel_distance(
+                    self.initial_position, 
+                    self.current_pose.pose.position
+                )
+                
+                self.get_logger().info(f"Traveled: {travel_distance:.2f}m / Target: {self.target_distance:.2f}m")
+                
+                # Check if target distance reached
+                if travel_distance >= self.target_distance:
+                    self.get_logger().info("🎯 Target distance reached! Stopping robot.")
+                    self.is_moving_forward = False
+                    self.forklift_detected = True  # Mark as complete
+                    self.stop_robot()
+                    return
+                
+                # Continue moving forward
+                cmd.linear.x = self.forward_velocity
+                
+            else:
+                self.get_logger().warn("No pose data available for forward movement")
+                cmd.linear.x = self.forward_velocity
+                
+        elif not self.forklift_detected and not self.is_moving_forward:
+            # Rotate to search for forklift
             cmd.angular.z = self.angular_velocity
-            self.cmd_vel_pub.publish(cmd)
             
             if not self.is_moving:
                 self.get_logger().info("Rotating to search for forklift...")
                 self.is_moving = True
+        
+        # Publish command
+        self.cmd_vel_pub.publish(cmd)
     
     def stop_robot(self):
         """Stop the robot completely"""
@@ -455,17 +522,21 @@ class Go2ForkliftController(Node):
         cmd.angular.z = 0.0
         
         # Send stop command multiple times to ensure it's received
-        for _ in range(10):  # Increased from 5 to 10 for more reliable stopping
+        for _ in range(10):
             self.cmd_vel_pub.publish(cmd)
-            time.sleep(0.05)  # Shorter intervals but more iterations
+            time.sleep(0.05)
         
         self.get_logger().info("Robot stopped successfully!")
-        self.is_moving = False  # Reset movement flag
+        self.is_moving = False
+        self.is_moving_forward = False  # Reset forward movement flag
         
-        # Print final detection summary
-        if self.forklift_bbox is not None:
-            self.get_logger().info("\n🎉 FORKLIFT DETECTION COMPLETE!")
-            self.print_bbox_coordinates(self.forklift_bbox)
+        # Print final summary
+        if self.initial_position is not None and self.current_pose is not None:
+            final_distance = self.calculate_travel_distance(
+                self.initial_position, 
+                self.current_pose.pose.position
+            )
+            self.get_logger().info(f"📍 Final position reached after traveling {final_distance:.2f} meters")
 
 def main(args=None):
     # Initialize ROS2

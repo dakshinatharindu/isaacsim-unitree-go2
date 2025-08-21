@@ -27,7 +27,13 @@ class Go2ForkliftController(Node):
             self.image_callback, 
             10
         )
-        
+        self.depth_image_sub = self.create_subscription(
+            Image, 
+            '/unitree_go2/front_cam/depth_image',
+            self.depth_image_callback, 
+            10
+        )
+
         # CV Bridge for image conversion
         self.bridge = CvBridge()
         
@@ -50,6 +56,7 @@ class Go2ForkliftController(Node):
         
         # Control variables
         self.current_image = None
+        self.current_depth_image = None
         self.forklift_detected = False
         self.is_moving = False
         self.forklift_bbox = None
@@ -81,7 +88,84 @@ class Go2ForkliftController(Node):
             self.current_image = self.bridge.imgmsg_to_cv2(msg, "bgr8")
         except Exception as e:
             self.get_logger().error(f"Error converting image: {e}")
+
+    def depth_image_callback(self, msg):
+        """Callback for receiving depth images"""
+        try:
+            # Convert ROS depth image to OpenCV format (typically 16-bit or 32-bit)
+            self.current_depth_image = self.bridge.imgmsg_to_cv2(msg, desired_encoding="16UC1")
+        except Exception as e:
+            self.get_logger().error(f"Error converting depth image: {e}")
     
+    def calculate_forklift_distance(self, bbox_info, depth_image):
+        """Calculate average distance to forklift using depth image and bounding box"""
+        if depth_image is None or bbox_info is None:
+            return None
+        
+        try:
+            # Extract bounding box coordinates
+            x1, y1, x2, y2 = bbox_info['x1'], bbox_info['y1'], bbox_info['x2'], bbox_info['y2']
+            
+            # Extract depth region using bounding box as mask
+            depth_roi = depth_image[y1:y2, x1:x2].copy()
+            
+            # Filter out invalid depth values (0 or very large values)
+            valid_mask = (depth_roi > 0) & (depth_roi < 10000)  # Adjust max distance as needed
+            valid_depths = depth_roi[valid_mask]
+            
+            if len(valid_depths) == 0:
+                self.get_logger().warn("No valid depth values in bounding box")
+                return None
+            
+            # Use clustering or simple thresholding to separate forklift from background
+            # Method 1: Use median as threshold (simpler approach)
+            median_depth = np.median(valid_depths)
+            self.get_logger().info(f"Median depth in bounding box: {median_depth:.2f} mm")
+            self.get_logger().info(f"Depth image value range: min={np.min(depth_image)}, max={np.max(depth_image)}")
+            
+            # Assume forklift is closer than background
+            # Take depths that are closer than median (foreground)
+            forklift_depths = valid_depths[valid_depths <= median_depth]
+            
+            # Method 2: More sophisticated - use k-means clustering (optional)
+            # from sklearn.cluster import KMeans
+            # kmeans = KMeans(n_clusters=2, random_state=0)
+            # clusters = kmeans.fit_predict(valid_depths.reshape(-1, 1))
+            # # Take the cluster with smaller centroid (closer objects)
+            # closer_cluster = np.argmin(kmeans.cluster_centers_.flatten())
+            # forklift_depths = valid_depths[clusters == closer_cluster]
+
+            # Draw bounding box on depth image for visualization
+            depth_image_clean = np.nan_to_num(depth_image, nan=0.0, posinf=0.0, neginf=0.0)
+            depth_image_vis = cv2.normalize(depth_image_clean, None, 0, 255, cv2.NORM_MINMAX)
+            depth_image_vis = depth_image_vis.astype(np.uint8)
+            depth_image_vis = cv2.cvtColor(depth_image_vis, cv2.COLOR_GRAY2BGR)
+            depth_image_vis = self.draw_bounding_box(depth_image_vis, bbox_info)
+
+            # Save the depth image with bounding box
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            depth_filename = f"forklift_depth_bbox_{timestamp}.jpg"
+            depth_filepath = os.path.join(self.output_dir, depth_filename)
+            cv2.imwrite(depth_filepath, depth_image_vis)
+            self.get_logger().info(f"Depth image with bounding box saved: {depth_filepath}")
+            
+            if len(forklift_depths) > 0:
+                # Calculate average distance of closest region
+                average_distance = np.mean(forklift_depths)
+                
+                # Convert from depth units to meters (adjust based on your camera specs)
+                # Typical conversion: if depth is in millimeters, divide by 1000
+                distance_meters = average_distance / 1 # Adjust conversion factor
+                
+                return distance_meters
+            else:
+                self.get_logger().warn("Could not separate forklift from background")
+                return None
+                
+        except Exception as e:
+            self.get_logger().error(f"Error calculating distance: {e}")
+            return None
+
     def encode_image_to_base64(self, image):
         """Convert OpenCV image to base64 string for VLLM API"""
         try:
@@ -315,6 +399,19 @@ class Go2ForkliftController(Node):
                     
                     if bbox_info is not None:
                         self.forklift_bbox = bbox_info
+
+                        # Calculate distance using depth image
+                        if self.current_depth_image is not None:
+                            distance = self.calculate_forklift_distance(bbox_info, self.current_depth_image)
+                            if distance is not None:
+                                self.get_logger().info(f"📏 FORKLIFT DISTANCE: {distance:.2f} meters")
+                                # Store distance in bbox_info for later use
+                                bbox_info['distance_meters'] = distance
+                            else:
+                                self.get_logger().warn("Could not calculate forklift distance")
+                        else:
+                            self.get_logger().warn("No depth image available for distance calculation")
+                        
                         self.print_bbox_coordinates(bbox_info)
                         
                         # Save image with bounding box

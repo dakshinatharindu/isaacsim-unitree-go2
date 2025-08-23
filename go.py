@@ -17,7 +17,7 @@ from ultralytics import YOLO
 from geometry_msgs.msg import PoseStamped
 import math
 
-class Go2ForkliftController(Node):
+class Controller(Node):
     def __init__(self):
         super().__init__('go2_forklift_controller')
         
@@ -376,7 +376,7 @@ class Go2ForkliftController(Node):
             annotated_image = self.draw_bounding_box(image, bbox_info)
             
             # Save the image
-            cv2.imwrite(filepath, annotated_image)
+            cv2.imwrite(filepath, image)
             
             self.get_logger().info(f"Detection image saved: {filepath}")
             return filepath
@@ -544,7 +544,7 @@ def main(args=None):
     
     try:
         # Create controller node
-        controller = Go2ForkliftController()
+        controller = Controller()
         
         # Spin the node
         rclpy.spin(controller)

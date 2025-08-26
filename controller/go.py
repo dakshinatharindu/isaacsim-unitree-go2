@@ -28,7 +28,10 @@ class GSClient:
 
 class Controller(Node):
     def __init__(self):
-        super().__init__('go2_forklift_controller')
+        super().__init__('go2_controller')
+
+        # target object
+        self.prompt = "person"
         
         # Publishers and subscribers
         self.cmd_vel_pub = self.create_publisher(Twist, '/unitree_go2/cmd_vel', 10)
@@ -69,30 +72,30 @@ class Controller(Node):
         # Control variables
         self.current_image = None
         self.current_depth_image = None
-        self.forklift_detected = False
+        self.object_detected = False
         self.is_moving = False
-        self.forklift_bbox = None
+        self.bbox = None
         
         # Movement parameters
         self.angular_velocity = 0.5  # rad/s for rotation
         self.detection_interval = 2.0  # seconds between detections
         
         # Create output directory for saved images
-        self.output_dir = "forklift_detections"
+        self.output_dir = "detections"
         os.makedirs(self.output_dir, exist_ok=True)
         
-        # Timer for periodic forklift detection
+        # Timer for periodic object detection
         self.detection_timer = self.create_timer(
             self.detection_interval, 
-            self.check_for_forklift
+            self.check_for_object
         )
         
         # Timer for movement control
         self.movement_timer = self.create_timer(0.1, self.movement_control)
         
-        self.get_logger().info("Go-2 Forklift Controller initialized")
-        self.get_logger().info("Starting rotation to search for forklift...")
-    
+        self.get_logger().info("Go-2 Controller initialized")
+        self.get_logger().info("Starting rotation to search for {}...".format(self.prompt))
+
     def pose_callback(self, msg):
         """Callback for receiving robot pose"""
         self.current_pose = msg
@@ -122,8 +125,8 @@ class Controller(Node):
         except Exception as e:
             self.get_logger().error(f"Error converting depth image: {e}")
     
-    def calculate_forklift_distance(self, bbox_info, depth_image):
-        """Calculate average distance to forklift using depth image and bounding box"""
+    def calculate_distance(self, bbox_info, depth_image):
+        """Calculate average distance to object using depth image and bounding box"""
         if depth_image is None or bbox_info is None:
             return None
         
@@ -141,24 +144,24 @@ class Controller(Node):
             if len(valid_depths) == 0:
                 self.get_logger().warn("No valid depth values in bounding box")
                 return None
-            
-            # Use clustering or simple thresholding to separate forklift from background
+
+            # Use clustering or simple thresholding to separate object from background
             # Method 1: Use median as threshold (simpler approach)
             median_depth = np.median(valid_depths)
             self.get_logger().info(f"Median depth in bounding box: {median_depth:.2f} mm")
             self.get_logger().info(f"Depth image value range: min={np.min(depth_image)}, max={np.max(depth_image)}")
-            
-            # Assume forklift is closer than background
+
+            # Assume object is closer than background
             # Take depths that are closer than median (foreground)
-            forklift_depths = valid_depths[valid_depths <= median_depth]
-            
+            object_depths = valid_depths[valid_depths <= median_depth]
+
             # Method 2: More sophisticated - use k-means clustering (optional)
             # from sklearn.cluster import KMeans
             # kmeans = KMeans(n_clusters=2, random_state=0)
             # clusters = kmeans.fit_predict(valid_depths.reshape(-1, 1))
             # # Take the cluster with smaller centroid (closer objects)
             # closer_cluster = np.argmin(kmeans.cluster_centers_.flatten())
-            # forklift_depths = valid_depths[clusters == closer_cluster]
+            # object_depths = valid_depths[clusters == closer_cluster]
 
             # Draw bounding box on depth image for visualization
             depth_image_clean = np.nan_to_num(depth_image, nan=0.0, posinf=0.0, neginf=0.0)
@@ -169,22 +172,22 @@ class Controller(Node):
 
             # Save the depth image with bounding box
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            depth_filename = f"forklift_depth_bbox_{timestamp}.jpg"
+            depth_filename = f"object_depth_bbox_{timestamp}.jpg"
             depth_filepath = os.path.join(self.output_dir, depth_filename)
             cv2.imwrite(depth_filepath, depth_image_vis)
             self.get_logger().info(f"Depth image with bounding box saved: {depth_filepath}")
-            
-            if len(forklift_depths) > 0:
+
+            if len(object_depths) > 0:
                 # Calculate average distance of closest region
-                average_distance = np.mean(forklift_depths)
-                
+                average_distance = np.mean(object_depths)
+
                 # Convert from depth units to meters (adjust based on your camera specs)
                 # Typical conversion: if depth is in millimeters, divide by 1000
                 distance_meters = average_distance / 1 # Adjust conversion factor
                 
                 return distance_meters
             else:
-                self.get_logger().warn("Could not separate forklift from background")
+                self.get_logger().warn("Could not separate object from background")
                 return None
                 
         except Exception as e:
@@ -213,8 +216,8 @@ class Controller(Node):
             self.get_logger().error(f"Error encoding image: {e}")
             return None
     
-    def detect_forklift_with_vllm(self, image):
-        """Use VLLM server to detect forklift in image"""
+    def detect_obj_with_vllm(self, image):
+        """Use VLLM server to detect object in image"""
         try:
             # Encode image
             image_base64 = self.encode_image_to_base64(image)
@@ -230,7 +233,7 @@ class Controller(Node):
                         "content": [
                             {
                                 "type": "text",
-                                "text": "Look at this image carefully. Is there a forklift visible in this image? Answer with only 'YES' if you can see a forklift, or 'NO' if you cannot see a forklift. Be very specific - a forklift is an industrial vehicle with two prongs/forks at the front for lifting pallets."
+                                "text": "Look at this image carefully. Is there a {} visible in this image? Answer with only 'YES' if you can see a {}, or 'NO' if you cannot see a {}.".format(self.prompt, self.prompt, self.prompt)
                             },
                             {
                                 "type": "image_url",
@@ -258,8 +261,8 @@ class Controller(Node):
                 answer = result['choices'][0]['message']['content'].strip().upper()
                 
                 self.get_logger().info(f"VLLM Response: {answer}")
-                
-                # Check if forklift is detected
+
+                # Check if object is detected
                 return "YES" in answer
             else:
                 self.get_logger().error(f"VLLM server error: {response.status_code}")
@@ -269,13 +272,13 @@ class Controller(Node):
             self.get_logger().error(f"Request to VLLM server failed: {e}")
             return False
         except Exception as e:
-            self.get_logger().error(f"Error in forklift detection: {e}")
+            self.get_logger().error(f"Error in object detection: {e}")
             return False
 
-    def detect_forklift_with_grounding_sam(self, image):
-        """Use Grounding SAM to detect forklift and get bounding box"""
+    def detect_obj_with_grounding_sam(self, image):
+        """Use Grounding SAM to detect object and get bounding box"""
         annotated_image = image.copy()
-        response = self.grounding_sam.detections(image=np.array(image), target_prompt="forklift")
+        response = self.grounding_sam.detections(image=np.array(image), target_prompt=self.prompt)
         scores = response["response"]["scores"]
         bboxes = response["response"]["boxes"]
         if len(scores) > 0 and max(scores) > 0.7:
@@ -287,7 +290,7 @@ class Controller(Node):
                 'x2': int(bbox[2]),
                 'y2': int(bbox[3]),
                 'confidence': float(max(scores)),
-                'class': "forklift",
+                'class': self.prompt,
                 'center_x': int((bbox[0] + bbox[2]) / 2),
                 'center_y': int((bbox[1] + bbox[3]) / 2),
                 'width': int(bbox[2] - bbox[0]),
@@ -343,7 +346,7 @@ class Controller(Node):
         """Save the image with bounding box"""
         try:
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            filename = f"forklift_detection_{timestamp}.jpg"
+            filename = f"detection_{timestamp}.jpg"
             filepath = os.path.join(self.output_dir, filename)
             
             # Draw bounding box on image
@@ -365,7 +368,7 @@ class Controller(Node):
             return
         
         self.get_logger().info("=" * 50)
-        self.get_logger().info("FORKLIFT BOUNDING BOX COORDINATES:")
+        self.get_logger().info("BOUNDING BOX COORDINATES:")
         self.get_logger().info(f"  Class: {bbox_info['class']}")
         self.get_logger().info(f"  Confidence: {bbox_info['confidence']:.3f}")
         self.get_logger().info(f"  Top-left corner (x1, y1): ({bbox_info['x1']}, {bbox_info['y1']})")
@@ -374,14 +377,14 @@ class Controller(Node):
         self.get_logger().info(f"  Width x Height: {bbox_info['width']} x {bbox_info['height']} pixels")
         self.get_logger().info("=" * 50)
     
-    def check_for_forklift(self):
-        """Periodic check for forklift in current image"""
-        if self.current_image is not None and not self.forklift_detected:
-            self.get_logger().info("Checking for forklift...")
+    def check_for_object(self):
+        """Periodic check for object in current image"""
+        if self.current_image is not None and not self.object_detected:
+            self.get_logger().info("Checking for {}...".format(self.prompt))
             
             # First use VLLM for initial detection
-            if self.detect_forklift_with_vllm(self.current_image):
-                self.get_logger().info("FORKLIFT DETECTED by VLLM! Stopping robot immediately...")
+            if self.detect_obj_with_vllm(self.current_image):
+                self.get_logger().info("{} DETECTED by VLLM! Stopping robot immediately...".format(self.prompt))
                 
                 # STOP ROBOT FIRST to prevent further rotation
                 self.stop_robot()
@@ -396,20 +399,20 @@ class Controller(Node):
                     self.get_logger().info("Running LLMDet for bounding box detection...")
 
                     # Use Grounding SAM to get bounding box on the stopped image
-                    bbox_info = self.detect_forklift_with_grounding_sam(detection_image)
+                    bbox_info = self.detect_obj_with_grounding_sam(detection_image)
                     
                     if bbox_info is not None:
-                        self.forklift_bbox = bbox_info
+                        self.bbox = bbox_info
 
                         # Calculate distance using depth image
                         if self.current_depth_image is not None:
-                            distance = self.calculate_forklift_distance(bbox_info, self.current_depth_image)
+                            distance = self.calculate_distance(bbox_info, self.current_depth_image)
                             if distance is not None:
-                                self.get_logger().info(f"📏 FORKLIFT DISTANCE: {distance:.2f} meters")
+                                self.get_logger().info(f"{self.prompt} DISTANCE: {distance:.2f} meters")
                                 # Store distance in bbox_info for later use
                                 bbox_info['distance_meters'] = distance
                             else:
-                                self.get_logger().warn("Could not calculate forklift distance")
+                                self.get_logger().warn("Could not calculate object distance")
                         else:
                             self.get_logger().warn("No depth image available for distance calculation")
                         
@@ -419,7 +422,7 @@ class Controller(Node):
                         if self.current_pose is not None and distance is not None:
                             # Save initial position for distance tracking
                             self.initial_position = self.current_pose.pose.position
-                            self.target_distance = distance - 0.5  # Stop 0.5m before forklift (safety margin)
+                            self.target_distance = distance - 0.5  # Stop 0.5m before object (safety margin)
                             self.is_moving_forward = True
                             
                             self.get_logger().info(f"Starting forward movement to cover {self.target_distance:.2f} meters")
@@ -432,24 +435,24 @@ class Controller(Node):
                         if saved_path:
                             self.get_logger().info(f"📸 Detection image saved to: {saved_path}")
                         
-                        self.forklift_detected = True
-                        self.get_logger().info("✅ Forklift detection and bounding box analysis complete!")
+                        self.object_detected = True
+                        self.get_logger().info("{} detection and bounding box analysis complete!".format(self.prompt))
                     else:
-                        self.get_logger().warn("VLLM detected forklift but Grounding SAM couldn't find bounding box.")
+                        self.get_logger().warn("VLLM detected {} but Grounding SAM couldn't find bounding box.".format(self.prompt))
                         self.get_logger().warn("This might be a false positive. Resuming search...")
                         # Reset detection flag to continue searching
-                        self.forklift_detected = False
+                        self.object_detected = False
                 else:
                     self.get_logger().error("No image available after stopping robot")
-                    self.forklift_detected = False
+                    self.object_detected = False
             else:
-                self.get_logger().info("No forklift detected, continuing search...")
-    
+                self.get_logger().info("No object detected, continuing search...")
+
     def movement_control(self):
         """Control robot movement"""
         cmd = Twist()
-        if self.is_moving_forward and self.forklift_detected:
-            # Moving forward towards forklift
+        if self.is_moving_forward and self.object_detected:
+            # Moving forward towards object
             if self.current_pose is not None and self.initial_position is not None:
                 # Calculate distance traveled
                 travel_distance = self.calculate_travel_distance(
@@ -461,9 +464,9 @@ class Controller(Node):
                 
                 # Check if target distance reached
                 if travel_distance >= self.target_distance:
-                    self.get_logger().info("🎯 Target distance reached! Stopping robot.")
+                    self.get_logger().info("Target distance reached! Stopping robot.")
                     self.is_moving_forward = False
-                    self.forklift_detected = True  # Mark as complete
+                    self.object_detected = True  # Mark as complete
                     self.stop_robot()
                     return
                 
@@ -474,12 +477,12 @@ class Controller(Node):
                 self.get_logger().warn("No pose data available for forward movement")
                 cmd.linear.x = self.forward_velocity
                 
-        elif not self.forklift_detected and not self.is_moving_forward:
-            # Rotate to search for forklift
+        elif not self.object_detected and not self.is_moving_forward:
+            # Rotate to search for object
             cmd.angular.z = self.angular_velocity
             
             if not self.is_moving:
-                self.get_logger().info("Rotating to search for forklift...")
+                self.get_logger().info("Rotating to search for {}...".format(self.prompt))
                 self.is_moving = True
         
         # Publish command
@@ -510,7 +513,7 @@ class Controller(Node):
                 self.initial_position, 
                 self.current_pose.pose.position
             )
-            self.get_logger().info(f"📍 Final position reached after traveling {final_distance:.2f} meters")
+            self.get_logger().info(f"Final position reached after traveling {final_distance:.2f} meters")
 
 def main(args=None):
     # Initialize ROS2

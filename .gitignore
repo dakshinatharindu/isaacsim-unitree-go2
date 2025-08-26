@@ -11,3 +11,4 @@ forklift_detections/
 controller/__pycache__/
 controller/lockfiles/
 *ufhpc*
+controller/detections/

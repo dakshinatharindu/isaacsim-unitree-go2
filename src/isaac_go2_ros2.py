@@ -9,6 +9,7 @@ from isaaclab.app import AppLauncher
 
 # add argparse arguments
 parser = argparse.ArgumentParser(description="Tutorial on running the cartpole RL environment.")
+parser.add_argument('-/persistent/isaac/asset_root/default', type=str, default="/blue/prabhat/tharinduo/isaac_ros2/simulator/Assets/isaacsim_assets/Assets/Isaac/4.5", help='Path to the default asset root directory')
 
 # append AppLauncher cli args
 AppLauncher.add_app_launcher_args(parser)
@@ -59,6 +60,12 @@ def run_simulator(cfg):
         sim_env.create_warehouse_shelves_env() # warehouse shelves
     elif (cfg.env_name == "full-warehouse"):
         sim_env.create_full_warehouse_env() # full warehouse
+    elif (cfg.env_name == "hospital"):
+        sim_env.create_hospital_env() # hospital
+    elif (cfg.env_name == "grid"):
+        sim_env.create_grid_env() # grid
+    elif (cfg.env_name == "office"):
+        sim_env.create_office_env() # office
 
     # Sensor setup
     sm = go2_sensors.SensorManager(cfg.num_envs)

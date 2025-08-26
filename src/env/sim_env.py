@@ -137,3 +137,11 @@ def create_office_env():
     prim = define_prim("/World/Office", "Xform")
     asset_path = assets_root_path+"/Isaac/Environments/Office/office.usd"
     prim.GetReferences().AddReference(asset_path)
+
+def create_grid_env():
+    add_semantic_label()
+    assets_root_path = nucleus_utils.get_assets_root_path()
+    prim = get_prim_at_path("/World/Grid")
+    prim = define_prim("/World/Grid", "Xform")
+    asset_path = assets_root_path+"/Isaac/Environments/Grid/default_environment.usd"
+    prim.GetReferences().AddReference(asset_path)

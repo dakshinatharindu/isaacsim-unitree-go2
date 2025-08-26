@@ -51,9 +51,10 @@ class GroundingSAM:
         ):
 
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
+        print(f"Using device: {self.device}")
         self.object_detector = pipeline(model=detector_id, task="zero-shot-object-detection", device=self.device)
         self.segmentator = AutoModelForMaskGeneration.from_pretrained(segmenter_id).to(self.device)
-        self.processor = AutoProcessor.from_pretrained(segmenter_id)
+        self.processor = AutoProcessor.from_pretrained(segmenter_id, use_fast=True)
 
         self.detector_threshold = detector_threshold
         self.polygon_refinement = polygon_refinement
@@ -224,7 +225,7 @@ if __name__ == "__main__":
     import argparse
 
     parser = argparse.ArgumentParser()
-    parser.add_argument("--port", type=int, default=12183)
+    parser.add_argument("--port", type=int, default=12185)
     args = parser.parse_args()
 
     class GroundingSAMServer(ServerMixin, GroundingSAM):

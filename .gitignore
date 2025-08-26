@@ -5,3 +5,9 @@ isaacsim/
 
 simulator/IsaacSim/
 simulator/IsaacLab/
+simulator/Assets/
+forklift_detections/
+*.pt
+controller/__pycache__/
+controller/lockfiles/
+*ufhpc*

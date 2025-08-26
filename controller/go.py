@@ -13,17 +13,16 @@ import time
 import json
 import os
 from datetime import datetime
-from ultralytics import YOLO
 from geometry_msgs.msg import PoseStamped
 import math
 from server_wrapper import send_request
 
-class LLMDetClient:
+class GSClient:
     def __init__(self, port:int = 12185):
         self.url = f"http://localhost:{port}/gdsam"
 
     def detections(self, image: np.ndarray, target_prompt: str):
-        print(f"LLMDetClient.detect_and_segment: {image.shape}, {target_prompt}" )
+        print(f"GSClient.detect_and_segment: {image.shape}, {target_prompt}" )
         response = send_request(self.url, image=image, target_prompt=target_prompt)
         return response
 
@@ -64,22 +63,8 @@ class Controller(Node):
         # VLLM server configuration
         self.vllm_url = "http://localhost:8000/v1/chat/completions"
         
-        # YOLO model initialization
-        # try:
-        #     # You can use different YOLO models:
-        #     # - yolov8n.pt (nano, fastest)
-        #     # - yolov8s.pt (small)
-        #     # - yolov8m.pt (medium)
-        #     # - yolov8l.pt (large)
-        #     # - yolov8x.pt (extra large, most accurate)
-        #     self.yolo_model = YOLO('yolov8n.pt')  # Using nano for speed
-        #     self.get_logger().info("YOLO model loaded successfully")
-        # except Exception as e:
-        #     self.get_logger().error(f"Failed to load YOLO model: {e}")
-        #     self.yolo_model = None
-        
         # Grounding SAM for object detection and segmentation
-        self.grounding_sam = LLMDetClient()
+        self.grounding_sam = GSClient()
 
         # Control variables
         self.current_image = None
@@ -286,65 +271,14 @@ class Controller(Node):
         except Exception as e:
             self.get_logger().error(f"Error in forklift detection: {e}")
             return False
-    
-    def detect_forklift_with_yolo(self, image):
-        """Use YOLO to detect forklift and get bounding box"""
-        # if self.yolo_model is None:
-        #     self.get_logger().warn("YOLO model not available")
-        #     return None
-        
-        # try:
-        #     # Run YOLO inference
-        #     results = self.yolo_model(image, verbose=False)
-            
-        #     # Process results
-        #     for result in results:
-        #         boxes = result.boxes
-        #         if boxes is not None:
-        #             for box in boxes:
-        #                 # Get class information
-        #                 class_id = int(box.cls[0])
-        #                 class_name = self.yolo_model.names[class_id].lower()
-        #                 confidence = float(box.conf[0])
-                        
-        #                 # Check if it's a forklift or related vehicle
-        #                 # YOLO COCO classes that might be relevant:
-        #                 # - truck (class 7)
-        #                 # - bus (class 5) - sometimes misclassified
-        #                 # You might need to adjust this based on your specific needs
-        #                 forklift_related_classes = ['truck', 'bus', 'car', 'train', '']  # Add more as needed
-                        
-        #                 if (class_name in forklift_related_classes and confidence > 0.3) or \
-        #                    ('fork' in class_name.lower()):
-        #                     # Get bounding box coordinates
-        #                     x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
-                            
-        #                     bbox_info = {
-        #                         'x1': int(x1),
-        #                         'y1': int(y1), 
-        #                         'x2': int(x2),
-        #                         'y2': int(y2),
-        #                         'confidence': confidence,
-        #                         'class': class_name,
-        #                         'center_x': int((x1 + x2) / 2),
-        #                         'center_y': int((y1 + y2) / 2),
-        #                         'width': int(x2 - x1),
-        #                         'height': int(y2 - y1)
-        #                     }
-                            
-        #                     self.get_logger().info(f"Detected {class_name} with confidence {confidence:.2f}")
-        #                     return bbox_info
-            
-        #     return None
-            
-        # except Exception as e:
-        #     self.get_logger().error(f"Error in YOLO detection: {e}")
-        #     return None
+
+    def detect_forklift_with_grounding_sam(self, image):
+        """Use Grounding SAM to detect forklift and get bounding box"""
         annotated_image = image.copy()
         response = self.grounding_sam.detections(image=np.array(image), target_prompt="forklift")
         scores = response["response"]["scores"]
         bboxes = response["response"]["boxes"]
-        if len(scores) > 0 and max(scores) > 0.8:
+        if len(scores) > 0 and max(scores) > 0.7:
             max_index = scores.index(max(scores))
             bbox = bboxes[max_index]
             bbox_info = {
@@ -353,15 +287,20 @@ class Controller(Node):
                 'x2': int(bbox[2]),
                 'y2': int(bbox[3]),
                 'confidence': float(max(scores)),
-                'class': "forklift"
+                'class': "forklift",
+                'center_x': int((bbox[0] + bbox[2]) / 2),
+                'center_y': int((bbox[1] + bbox[3]) / 2),
+                'width': int(bbox[2] - bbox[0]),
+                'height': int(bbox[3] - bbox[1])
             }
-            x1, y1, x2, y2 = map(int, self.bbox)
+            x1, y1, x2, y2 = map(int, bbox)
                         
             cv2.rectangle(annotated_image, (x1, y1), (x2, y2), (255, 0, 0), 2)
             cv2.putText(annotated_image, f"{scores[max_index]:.2f}", (x1, y1-10), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 0), 2)
             ts = datetime.now().strftime("%Y%m%d_%H%M%S")
             cv2.imwrite(f"{self.output_dir}/input_{ts}.png", annotated_image)
-        return bbox_info
+            return bbox_info
+        return None
 
     def draw_bounding_box(self, image, bbox_info):
         """Draw bounding box on image"""
@@ -455,9 +394,9 @@ class Controller(Node):
                 
                 if detection_image is not None:
                     self.get_logger().info("Running LLMDet for bounding box detection...")
-                    
-                    # Use YOLO to get bounding box on the stopped image
-                    bbox_info = self.detect_forklift_with_yolo(detection_image)
+
+                    # Use Grounding SAM to get bounding box on the stopped image
+                    bbox_info = self.detect_forklift_with_grounding_sam(detection_image)
                     
                     if bbox_info is not None:
                         self.forklift_bbox = bbox_info
@@ -496,7 +435,7 @@ class Controller(Node):
                         self.forklift_detected = True
                         self.get_logger().info("✅ Forklift detection and bounding box analysis complete!")
                     else:
-                        self.get_logger().warn("VLLM detected forklift but YOLO couldn't find bounding box.")
+                        self.get_logger().warn("VLLM detected forklift but Grounding SAM couldn't find bounding box.")
                         self.get_logger().warn("This might be a false positive. Resuming search...")
                         # Reset detection flag to continue searching
                         self.forklift_detected = False

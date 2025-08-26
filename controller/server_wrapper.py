@@ -161,4 +161,4 @@ def _send_request(url: str, **kwargs: Any) -> dict:
             pass
         raise e
 
-    return resultß
+    return result

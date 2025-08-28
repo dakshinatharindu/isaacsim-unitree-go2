@@ -31,7 +31,7 @@ class Controller(Node):
         super().__init__('go2_controller')
 
         # target object
-        self.prompt = "person"
+        self.prompt = "plant"
         
         # Publishers and subscribers
         self.cmd_vel_pub = self.create_publisher(Twist, '/unitree_go2/cmd_vel', 10)
@@ -147,13 +147,14 @@ class Controller(Node):
 
             # Use clustering or simple thresholding to separate object from background
             # Method 1: Use median as threshold (simpler approach)
-            median_depth = np.median(valid_depths)
-            self.get_logger().info(f"Median depth in bounding box: {median_depth:.2f} mm")
-            self.get_logger().info(f"Depth image value range: min={np.min(depth_image)}, max={np.max(depth_image)}")
+            # median_depth = np.median(valid_depths)
+            ret, thresh = cv2.threshold(valid_depths, np.min(valid_depths), np.max(valid_depths), cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+            self.get_logger().info(f"Thresh depth in bounding box: {ret:.2f} mm")
+            # self.get_logger().info(f"Depth image value range: min={np.min(depth_image)}, max={np.max(depth_image)}")
 
             # Assume object is closer than background
             # Take depths that are closer than median (foreground)
-            object_depths = valid_depths[valid_depths <= median_depth]
+            object_depths = valid_depths[valid_depths <= ret]
 
             # Method 2: More sophisticated - use k-means clustering (optional)
             # from sklearn.cluster import KMeans

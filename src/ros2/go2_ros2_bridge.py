@@ -57,17 +57,17 @@ class RobotDataManager(Node):
         for i in range(self.num_envs):
             if (self.num_envs == 1):
                 self.odom_pub.append(
-                    self.create_publisher(Odometry, "unitree_go2/odom", 10))
+                    self.create_publisher(Odometry, "isaacsim/platform/odom", 10))
                 self.pose_pub.append(
-                    self.create_publisher(PoseStamped, "unitree_go2/pose", 10))
+                    self.create_publisher(PoseStamped, "isaacsim/platform/pose", 10))
                 self.lidar_pub.append(
-                    self.create_publisher(PointCloud2, "unitree_go2/lidar/point_cloud", 10)
+                    self.create_publisher(PointCloud2, "isaacsim/lidar/point_cloud", 10)
                 )
                 self.semantic_seg_img_vis_pub.append(
                     self.create_publisher(Image, "unitree_go2/front_cam/semantic_segmentation_image_vis", 10)
                 )
                 self.cmd_vel_sub.append(
-                    self.create_subscription(Twist, "unitree_go2/cmd_vel", 
+                    self.create_subscription(Twist, "cmd_vel", 
                     lambda msg: self.cmd_vel_callback(msg, 0), 10)
                 )
                 self.semantic_seg_img_sub.append(
@@ -338,8 +338,8 @@ class RobotDataManager(Node):
     def pub_image_graph(self):
         for i in range(self.num_envs):
             if (self.num_envs == 1):
-                color_topic_name = "unitree_go2/front_cam/color_image"
-                depth_topic_name = "unitree_go2/front_cam/depth_image"
+                color_topic_name = "isaacsim/image/1/compressed"
+                depth_topic_name = "isaacsim/depth/1/image_raw"
                 # segmentation_topic_name = "unitree_go2/front_cam/segmentation_image"
                 # depth_cloud_topic_name = "unitree_go2/front_cam/depth_cloud"
                 frame_id = "unitree_go2/front_cam"                         

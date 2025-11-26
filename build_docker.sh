@@ -1,0 +1,1 @@
+docker build --no-cache --build-arg HOST_USER=$(whoami) --build-arg HOST_UID=$(id -u) --build-arg HOST_GID=$(id -g) -t "isaacsim_4.5.0:latest" .

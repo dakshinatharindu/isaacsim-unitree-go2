@@ -26,77 +26,59 @@ RUN apt-get install -y --no-install-recommends \
     git \
     cmake \
     git-lfs \
-    sudo
+    sudo \
+    gnupg2 \
+    lsb-release \
+    curl \
+    locales \
+    tzdata
 
-# Add a symlink to /root to easily get to Isaac Sim examples
-RUN ln -s /isaac-sim /root/isaac-sim
-
-# Setup Git and clone Habitat Sim
-RUN git lfs install
+# Set up locale
+RUN locale-gen en_US en_US.UTF-8
+RUN update-locale LC_ALL=en_US.UTF-8 LANG=en_US.UTF-8
+ENV LANG=en_US.UTF-8
 
 # Update the working directiory from what the Isaac Sim container sets
 # to root
 WORKDIR /root
 
-# Install and configure Anaconda
 
-
-# Install ROS2
+# ROS2 Humble setup
+RUN apt install software-properties-common -y
 RUN add-apt-repository universe
-RUN curl -sSL https://raw.githubusercontent.com/ros/rosdistro/master/ros.key -o /usr/share/keyrings/ros-archive-keyring.gpg
-RUN echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/ros-archive-keyring.gpg] http://packages.ros.org/ros2/ubuntu $(. /etc/os-release && echo $UBUNTU_CODENAME) main" | tee /etc/apt/sources.list.d/ros2.list > /dev/null
+RUN apt update && apt install curl -y
 
-# RUN add-apt-repository universe
-# RUN apt update && apt install curl -y
-
-# RUN export ROS_APT_SOURCE_VERSION=$(curl -s https://api.github.com/repos/ros-infrastructure/ros-apt-source/releases/latest | grep -F "tag_name" | awk -F\" '{print $4}')
-# RUN curl -L -o /tmp/ros2-apt-source.deb "https://github.com/ros-infrastructure/ros-apt-source/releases/download/${ROS_APT_SOURCE_VERSION}/ros2-apt-source_${ROS_APT_SOURCE_VERSION}.$(. /etc/os-release && echo $VERSION_CODENAME)_all.deb"
-# RUN dpkg -i /tmp/ros2-apt-source.deb
-# RUN rm /tmp/ros2-apt-source.deb
-# RUN apt update
-
+RUN export ROS_APT_SOURCE_VERSION=$(curl -s https://api.github.com/repos/ros-infrastructure/ros-apt-source/releases/latest | grep -F "tag_name" | awk -F\" '{print $4}') && \
+    curl -L -o /tmp/ros2-apt-source.deb "https://github.com/ros-infrastructure/ros-apt-source/releases/download/${ROS_APT_SOURCE_VERSION}/ros2-apt-source_${ROS_APT_SOURCE_VERSION}.$(. /etc/os-release && echo $VERSION_CODENAME)_all.deb" && \
+    dpkg -i /tmp/ros2-apt-source.deb && \
+    rm /tmp/ros2-apt-source.deb
+    
+# Then proceed with ROS2 installation
 RUN apt-get update && apt-get install -y --no-install-recommends --allow-downgrades \
-    ros-humble-desktop \
-    python3-argcomplete \
-    ros-dev-tools \
-    ros-humble-rmw-cyclonedds-cpp \
-    ros-humble-rosidl-generator-dds-idl \
-    # ros-humble-rviz2 \
-    libfreetype6-dev \
-    libbrotli-dev \
-    libbrotli1=1.0.9-2build6
+        ros-humble-desktop \
+        python3-argcomplete \
+        ros-dev-tools \
+        ros-humble-rmw-cyclonedds-cpp \
+        ros-humble-rosidl-generator-dds-idl \
+        libfreetype6-dev \
+        libbrotli-dev \
+        libbrotli1=1.0.9-2build6
+    
+# Install additional ROS2 tools
+RUN apt-get install -y \
+        python3-rosdep \
+        python3-rosinstall \
+        python3-rosinstall-generator \
+        python3-wstool \
+        build-essential \
+        python3-colcon-common-extensions \
+        python3-pip
+    
+# Initialize rosdep
+RUN rosdep init || true
+RUN rosdep update
 
-# RUN apt-get install -y \
-#         python3-rosdep \
-#         python3-rosinstall \
-#         python3-rosinstall-generator \
-#         python3-wstool \
-#         build-essential \
-#         python3-colcon-common-extensions \
-#         python3-pip
-
-
-# Source ROS2 Humble on login
-RUN echo "source /opt/ros/humble/setup.bash" >> /etc/bash.bashrc
-
-# Build arguments: you must pass HOST_UID and HOST_GID when building
-ARG HOST_USER
-ARG HOST_UID
-ARG HOST_GID
-
-
-# Create the group and user with same UID/GID as host
-RUN groupadd -g ${HOST_GID} ${HOST_USER} && \
-    useradd -m -u ${HOST_UID} -g ${HOST_GID} -s /bin/bash ${HOST_USER}
-
-# Give passwordless sudo access
-RUN echo "${HOST_USER} ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/${HOST_USER} && \
-    chmod 0440 /etc/sudoers.d/${HOST_USER}
-
-# Switch to the created user
-USER ${HOST_USER}
-WORKDIR /home/${HOST_USER}
-
+# Install Anaconda for package management
 RUN wget -q --show-progress --progres=bar:force:noscroll \
     https://repo.anaconda.com/archive/Anaconda3-2024.10-1-Linux-x86_64.sh \
     -O /tmp/Anaconda3-2024.10-1-Linux-x86_64.sh
@@ -108,14 +90,52 @@ RUN rm /tmp/Anaconda3-2024.10-1-Linux-x86_64.sh
 RUN ./anaconda3/bin/conda init && \
     ./anaconda3/bin/conda config --set auto_activate_base false
 
+# Install Isaac Lab environment
+RUN bash -c "export TERM=linux && \
+    source /opt/ros/humble/setup.bash && \
+    git clone https://github.com/isaac-sim/IsaacLab.git && \
+    cd IsaacLab && \
+    git checkout v2.2.0 && \
+    ln -s /isaac-sim _isaac_sim && \
+    source /root/anaconda3/etc/profile.d/conda.sh && \
+    ./isaaclab.sh --conda isaaclab && \
+    conda run -n isaaclab ./isaaclab.sh --install"
+
+# # Source ROS2 Humble on login
+RUN echo "source /opt/ros/humble/setup.bash" >> /root/.bashrc
+
+# # Build arguments: you must pass HOST_UID and HOST_GID when building
+# ARG HOST_USER
+# ARG HOST_UID
+# ARG HOST_GID
+
+
+# # Create the group and user with same UID/GID as host
+# RUN groupadd -g ${HOST_GID} ${HOST_USER} && \
+#     useradd -m -u ${HOST_UID} -g ${HOST_GID} -s /bin/bash ${HOST_USER}
+
+# # Give passwordless sudo access
+# RUN echo "${HOST_USER} ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/${HOST_USER} && \
+#     chmod 0440 /etc/sudoers.d/${HOST_USER}
+
+# # Switch to the created user
+# USER ${HOST_USER}
+# WORKDIR /home/${HOST_USER}
+
+# RUN wget -q --show-progress --progres=bar:force:noscroll \
+#     https://repo.anaconda.com/archive/Anaconda3-2024.10-1-Linux-x86_64.sh \
+#     -O /tmp/Anaconda3-2024.10-1-Linux-x86_64.sh
+
+# RUN bash /tmp/Anaconda3-2024.10-1-Linux-x86_64.sh -b
+
+# RUN rm /tmp/Anaconda3-2024.10-1-Linux-x86_64.sh
+
+# RUN ./anaconda3/bin/conda init && \
+#     ./anaconda3/bin/conda config --set auto_activate_base false
+
 # RUN source /opt/ros/humble/setup.bash
 
-# # Install Isaac Lab environment
-# RUN git clone https://github.com/isaac-sim/IsaacLab.git
-# RUN cd IsaacLab
-# RUN git checkout v2.2.0
-# RUN ln -s /isaac-sim _isaac_sim
-# RUN ./isaaclab.sh --conda isaaclab
+
 
 
 ENTRYPOINT ["/bin/bash", "-l"]

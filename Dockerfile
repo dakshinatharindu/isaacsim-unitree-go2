@@ -91,12 +91,26 @@ RUN ./anaconda3/bin/conda init && \
     ./anaconda3/bin/conda config --set auto_activate_base false
 
 # Install Isaac Lab environment
+# RUN bash -c "export TERM=linux && \
+#     source /opt/ros/humble/setup.bash && \
+#     git clone https://github.com/isaac-sim/IsaacLab.git && \
+#     cd IsaacLab && \
+#     git checkout v2.2.0 && \
+#     ln -s /isaac-sim _isaac_sim && \
+#     source /root/anaconda3/etc/profile.d/conda.sh && \
+#     ./isaaclab.sh --conda isaaclab && \
+#     conda run -n isaaclab ./isaaclab.sh --install"
+
+COPY isaac-sim-standalone-4.5.0-linux-x86_64.zip /root/
+RUN cd /root && unzip isaac-sim-standalone-4.5.0-linux-x86_64.zip -d ./IsaacSim &&\
+    rm isaac-sim-standalone-4.5.0-linux-x86_64.zip
+
 RUN bash -c "export TERM=linux && \
     source /opt/ros/humble/setup.bash && \
     git clone https://github.com/isaac-sim/IsaacLab.git && \
     cd IsaacLab && \
     git checkout v2.2.0 && \
-    ln -s /isaac-sim _isaac_sim && \
+    ln -s /root/IsaacSim _isaac_sim && \
     source /root/anaconda3/etc/profile.d/conda.sh && \
     ./isaaclab.sh --conda isaaclab && \
     conda run -n isaaclab ./isaaclab.sh --install"

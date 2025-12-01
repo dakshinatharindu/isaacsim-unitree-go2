@@ -9,12 +9,16 @@ from isaaclab.app import AppLauncher
 
 # add argparse arguments
 parser = argparse.ArgumentParser(description="Tutorial on running the cartpole RL environment.")
-parser.add_argument('-/persistent/isaac/asset_root/default', type=str, default="/blue/prabhat/tharinduo/isaac_ros2/simulator/Assets/isaacsim_assets/Assets/Isaac/4.5", help='Path to the default asset root directory')
+# parser.add_argument('-/persistent/isaac/asset_root/default', type=str, default="/blue/prabhat/tharinduo/isaac_ros2/simulator/Assets/isaacsim_assets/Assets/Isaac/4.5", help='Path to the default asset root directory')
 
 # append AppLauncher cli args
 AppLauncher.add_app_launcher_args(parser)
 # parse the arguments
 args_cli = parser.parse_args()
+
+# Enable streaming mode (disable GUI)
+args_cli.headless = True  # Keep rendering enabled for streaming
+args_cli.livestream = 1    # Enable native streaming (0=disabled, 1=native, 2=websocket)
 
 # launch omniverse app
 app_launcher = AppLauncher(args_cli)

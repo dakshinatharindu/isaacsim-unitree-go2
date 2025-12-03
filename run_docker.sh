@@ -1,12 +1,22 @@
-docker run --name isaac-sim --entrypoint bash -it --runtime=nvidia --gpus all -e "ACCEPT_EULA=Y" --rm --network=host \
-    -e "PRIVACY_CONSENT=Y" \
-    -v ~/docker/isaac-sim/cache/kit:/isaac-sim/kit/cache:rw \
-    -v ~/docker/isaac-sim/cache/ov:/root/.cache/ov:rw \
-    -v ~/docker/isaac-sim/cache/pip:/root/.cache/pip:rw \
-    -v ~/docker/isaac-sim/cache/glcache:/root/.cache/nvidia/GLCache:rw \
-    -v ~/docker/isaac-sim/cache/computecache:/root/.nv/ComputeCache:rw \
-    -v ~/docker/isaac-sim/logs:/root/.nvidia-omniverse/logs:rw \
-    -v ~/docker/isaac-sim/data:/root/.local/share/ov/data:rw \
-    -v ~/docker/isaac-sim/documents:/root/Documents:rw \
-    -v ~/projects/isaacsim-unitree-go2:/root/isaacsim-unitree-go2:rw \
-    isaacsim_4.5.0
+docker run --rm --name tiamat --entrypoint bash -it --gpus all \
+--network=host \
+--runtime=nvidia \
+-e X11_FORWARDING_ENABLED=1 \
+-e PRIVACY_CONSENT=Y \
+-e ACCEPT_EULA=Y \
+-e DISPLAY=$DISPLAY \
+-e "ACCEPT_EULA=Y" \
+-e XAUTHORITY=/root/.Xauthority \
+-v /tmp/.X11-unix:/tmp/.X11-unix \
+-v ~/.Xauthority:/root/.Xauthority:rw \
+-v ~/docker/isaac-sim/cache/kit:/isaac-sim/kit/cache:rw \
+-v ~/docker/isaac-sim/cache/ov:/root/.cache/ov:rw \
+-v ~/docker/isaac-sim/cache/pip:/root/.cache/pip:rw \
+-v ~/docker/isaac-sim/cache/glcache:/root/.cache/nvidia/GLCache:rw \
+-v ~/docker/isaac-sim/cache/computecache:/root/.nv/ComputeCache:rw \
+-v ~/docker/isaac-sim/logs:/root/.nvidia-omniverse/logs:rw \
+-v ~/docker/isaac-sim/data:/root/.local/share/ov/data:rw \
+-v ~/docker/isaac-sim/documents:/root/Documents:rw \
+-v ./IsaacSimAssests:/root/IsaacSimAssests:rw \
+-v ./scenes:/root/scenes:rw \
+tiamat
